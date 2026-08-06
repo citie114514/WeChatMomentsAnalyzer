@@ -1,0 +1,34 @@
+# Build outputs
+bin/
+obj/
+
+# Publish output
+publish/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Rider
+.idea/
+
+# NuGet
+*.nupkg
+packages/
+
+# Runtime / debug
+Debug/
+*.log
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# User templates / data (keep folder structure but ignore contents)
+**/Templates/*.png
+**/Templates/*.jpg
+**/Templates/*.jpeg
+**/Contacts/*.png
+**/Contacts/*.jpg
+**/Contacts/*.jpeg

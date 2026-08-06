@@ -1,0 +1,41 @@
+<Window
+    x:Class="WeChatMomentsAnalyzer.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:WeChatMomentsAnalyzer"
+    xmlns:views="using:WeChatMomentsAnalyzer.Views">
+    <Grid>
+        <NavigationView
+            x:Name="NavView"
+            PaneDisplayMode="Left"
+            IsBackButtonVisible="Collapsed"
+            OpenPaneLength="220"
+            CompactPaneLength="64"
+            SelectionChanged="NavView_SelectionChanged"
+            Background="{ThemeResource Md3SurfaceBackgroundColor}">
+            <NavigationView.MenuItems>
+                <NavigationViewItem Tag="Scan" Content="扫描朋友圈">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE895;" FontFamily="Segoe MDL2 Assets"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Tag="Friend" Content="按好友查询">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE779;" FontFamily="Segoe MDL2 Assets"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Tag="Ranking" Content="点赞排行榜">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE1D1;" FontFamily="Segoe MDL2 Assets"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+
+            <NavigationView.Header>
+                <TextBlock Text="微信朋友圈点赞分析" Style="{ThemeResource Md3HeadlineSmallStyle}" Margin="16,12,0,12"/>
+            </NavigationView.Header>
+
+            <Frame x:Name="ContentFrame" Padding="0"/>
+        </NavigationView>
+    </Grid>
+</Window>

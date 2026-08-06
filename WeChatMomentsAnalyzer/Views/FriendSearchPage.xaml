@@ -1,0 +1,108 @@
+<Page
+    x:Class="WeChatMomentsAnalyzer.Views.FriendSearchPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:WeChatMomentsAnalyzer.Models"
+    Background="{ThemeResource Md3SurfaceBackgroundColor}">
+
+    <Page.Resources>
+        <DataTemplate x:Key="MomentCardTemplate" x:DataType="models:MomentPost">
+            <Border Style="{StaticResource Md3ElevatedCardStyle}" Margin="0,0,0,12">
+                <StackPanel Spacing="8">
+                    <Grid>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Border Background="{ThemeResource Md3PrimaryContainerBrush}"
+                                    CornerRadius="{StaticResource Md3ShapeFullCornerRadius}" Padding="8,2">
+                                <TextBlock Text="{x:Bind Publisher}" Style="{ThemeResource Md3LabelLargeStyle}"
+                                           Foreground="{ThemeResource Md3OnPrimaryContainerBrush}"/>
+                            </Border>
+                        </StackPanel>
+                        <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center"
+                                   Style="{ThemeResource Md3BodySmallStyle}"
+                                   Text="{x:Bind PostTime, Mode=OneWay, Converter={StaticResource DateTimeConverter}}"/>
+                    </Grid>
+                    <TextBlock Text="{x:Bind Content}" TextWrapping="Wrap" MaxLines="6"
+                               Style="{ThemeResource Md3BodyMediumStyle}"/>
+                    <Border Background="{ThemeResource Md3SecondaryContainerBrush}"
+                            CornerRadius="{StaticResource Md3ShapeSmallCornerRadius}" Padding="8,4" Margin="0,4,0,0">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xEB52;" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                                      Foreground="{ThemeResource Md3OnSecondaryContainerBrush}"/>
+                            <TextBlock TextWrapping="Wrap" Style="{ThemeResource Md3BodySmallStyle}"
+                                       Foreground="{ThemeResource Md3OnSecondaryContainerBrush}"
+                                       Text="{x:Bind Likers, Mode=OneWay, Converter={StaticResource LikersToStringConverter}}"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+    </Page.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 顶部应用栏 -->
+        <Border Grid.Row="0" Style="{StaticResource Md3TopAppBarStyle}">
+            <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                <FontIcon Glyph="&#xE779;" FontFamily="Segoe MDL2 Assets" FontSize="22"
+                          Foreground="{ThemeResource Md3PrimaryBrush}"/>
+                <TextBlock Text="按好友查询" Style="{ThemeResource Md3TitleLargeStyle}" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 搜索区 -->
+        <Border Grid.Row="1" Style="{StaticResource Md3FilledCardStyle}" Margin="32,8,32,16">
+            <StackPanel Spacing="12">
+                <TextBlock Text="选择或输入好友昵称，查询他/她给你点过赞的所有朋友圈"
+                           Style="{ThemeResource Md3BodyMediumStyle}"/>
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <AutoSuggestBox Grid.Column="0"
+                                    x:Name="FriendBox"
+                                    PlaceholderText="输入好友昵称…"
+                                    Text="{x:Bind ViewModel.FriendName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                    ItemsSource="{x:Bind ViewModel.Suggestions, Mode=OneWay}"
+                                    QueryIcon="Find"
+                                    QuerySubmitted="FriendBox_QuerySubmitted"
+                                    SuggestionChosen="FriendBox_SuggestionChosen"
+                                    CornerRadius="{StaticResource Md3ShapeExtraSmallCornerRadius}"/>
+                    <Button Grid.Column="1" Style="{StaticResource Md3FilledButtonStyle}"
+                            Command="{x:Bind ViewModel.SearchCommand}">
+                        <TextBlock Text="查询"/>
+                    </Button>
+                </Grid>
+                <TextBlock Text="{x:Bind ViewModel.Summary, Mode=OneWay}" Style="{ThemeResource Md3BodyMediumStyle}"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 结果列表 -->
+        <ScrollViewer Grid.Row="2" Padding="32,0,32,24" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <ItemsControl ItemsSource="{x:Bind ViewModel.Results, Mode=OneWay}"
+                              ItemTemplate="{StaticResource MomentCardTemplate}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                </ItemsControl>
+                <Border Visibility="{x:Bind ViewModel.IsEmptyVisible, Mode=OneWay}"
+                        Style="{StaticResource Md3ElevatedCardStyle}" Margin="0,12,0,0"
+                        HorizontalAlignment="Center">
+                    <StackPanel Spacing="8" HorizontalAlignment="Center">
+                        <FontIcon Glyph="&#xE721;" FontFamily="Segoe MDL2 Assets" FontSize="36"
+                                  Foreground="{ThemeResource Md3OnSurfaceVariantBrush}"/>
+                        <TextBlock Text="没有匹配的记录" Style="{ThemeResource Md3TitleMediumStyle}"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>

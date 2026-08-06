@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <UseXamlCompilerExecutable>false</UseXamlCompilerExecutable>
+    <VCInstallPath32>dummy</VCInstallPath32>
+    <VCInstallPath64>dummy</VCInstallPath64>
+  </PropertyGroup>
+</Project>

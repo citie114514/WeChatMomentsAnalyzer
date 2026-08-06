@@ -1,0 +1,93 @@
+<Page
+    x:Class="WeChatMomentsAnalyzer.Views.RankingPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:WeChatMomentsAnalyzer.Models"
+    Background="{ThemeResource Md3SurfaceBackgroundColor}">
+
+    <Page.Resources>
+        <DataTemplate x:Key="RankingRowTemplate" x:DataType="models:FriendStats">
+            <Border Style="{StaticResource Md3ElevatedCardStyle}" Margin="0,0,0,10">
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- 名次徽标 -->
+                    <Border Grid.Column="0" Width="40" Height="40"
+                            Background="{ThemeResource Md3PrimaryContainerBrush}"
+                            CornerRadius="{StaticResource Md3ShapeFullCornerRadius}">
+                        <TextBlock Text="{x:Bind RankLabel, Mode=OneWay}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Foreground="{ThemeResource Md3OnPrimaryContainerBrush}"
+                                   Style="{ThemeResource Md3TitleMediumStyle}"/>
+                    </Border>
+
+                    <!-- 好友昵称 + 上次点赞时间 -->
+                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind FriendName}" Style="{ThemeResource Md3TitleMediumStyle}"/>
+                        <TextBlock Text="{x:Bind LastLikeTime, Mode=OneWay, Converter={StaticResource DateTimeConverter}}"
+                                   Style="{ThemeResource Md3BodySmallStyle}"/>
+                    </StackPanel>
+
+                    <!-- 点赞数 -->
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xEB52;" FontFamily="Segoe MDL2 Assets" FontSize="16"
+                                  Foreground="{ThemeResource Md3TertiaryBrush}"/>
+                        <TextBlock Text="{x:Bind LikeCount}" Style="{ThemeResource Md3HeadlineSmallStyle}"
+                                   Foreground="{ThemeResource Md3PrimaryBrush}"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+    </Page.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 顶部应用栏 -->
+        <Border Grid.Row="0" Style="{StaticResource Md3TopAppBarStyle}">
+            <Grid>
+                <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                    <FontIcon Glyph="&#xE1D1;" FontFamily="Segoe MDL2 Assets" FontSize="22"
+                              Foreground="{ThemeResource Md3PrimaryBrush}"/>
+                    <TextBlock Text="点赞排行榜" Style="{ThemeResource Md3TitleLargeStyle}" VerticalAlignment="Center"/>
+                </StackPanel>
+                <Button HorizontalAlignment="Right" Style="{StaticResource Md3TextButtonStyle}"
+                        Command="{x:Bind ViewModel.LoadCommand}">
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <FontIcon Glyph="&#xE72C;" FontFamily="Segoe MDL2 Assets" FontSize="14"/>
+                        <TextBlock Text="刷新"/>
+                    </StackPanel>
+                </Button>
+            </Grid>
+        </Border>
+
+        <!-- 摘要区 -->
+        <Border Grid.Row="1" Style="{StaticResource Md3FilledCardStyle}" Margin="32,8,32,16">
+            <StackPanel Spacing="6">
+                <TextBlock Text="{x:Bind ViewModel.Summary, Mode=OneWay}" Style="{ThemeResource Md3BodyMediumStyle}"/>
+                <TextBlock TextWrapping="Wrap" Style="{ThemeResource Md3BodySmallStyle}"
+                           Text="按好友给你点赞的朋友圈数量倒序排列。点击列表项可跳转到「按好友查询」查看具体朋友圈。"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 排行榜列表 -->
+        <ScrollViewer Grid.Row="2" Padding="32,0,32,24" VerticalScrollBarVisibility="Auto">
+            <ItemsControl ItemsSource="{x:Bind ViewModel.Ranking, Mode=OneWay}"
+                          ItemTemplate="{StaticResource RankingRowTemplate}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+            </ItemsControl>
+        </ScrollViewer>
+    </Grid>
+</Page>
