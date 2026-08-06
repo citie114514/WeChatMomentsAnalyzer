@@ -177,86 +177,92 @@ public sealed class WeChatAutomationService
     // ====== 打开朋友圈 ======
 
     /// <summary>
-    /// 打开朋友圈：跳过 UIA，直接图像识别 + 兜底坐标。
+    /// 打开朋友圈：优先坐标兜底，再尝试图像识别。
+    /// 坐标根据微信窗口左侧栏图标排列动态计算。
     /// </summary>
     private async Task<IntPtr?> OpenMomentsAsync(IntPtr mainWnd, ScanConfig config, CancellationToken ct)
     {
-        // 如果已经打开了朋友圈，直接返回
         IntPtr? existing = FindMomentsWindow();
         if (existing != null) return existing;
 
         MinimizeOwnWindow();
         BringToFront(mainWnd);
-        await Task.Delay(800, ct);
+        await Task.Delay(1000, ct);
 
         GetWindowRect(mainWnd, out RECT mainRect);
         int winW = mainRect.Right - mainRect.Left;
         int winH = mainRect.Bottom - mainRect.Top;
 
-        // 保存整屏截图，便于诊断
         SaveDebugScreenshot(mainWnd, "main_win");
 
-        // 左侧栏宽度约 50~60 像素
-        int sidebarWidth = Math.Min(60, winW);
-        var sidebarRoi = new Rectangle(mainRect.Left, mainRect.Top, sidebarWidth, winH);
+        // 微信左侧栏图标参数（根据实际截图估算）
+        int iconSpacing = 56; // 图标中心间距
+        int firstIconTopOffset = 50; // 第一个图标中心距窗口顶部的距离
+        int sidebarCenterX = mainRect.Left + 30; // 左侧栏中心
+        int momentsIconY = mainRect.Top + firstIconTopOffset + 3 * iconSpacing; // 第4个图标
 
-        LogMsg($"步骤1: 图像识别匹配左侧栏朋友圈图标 (ROI: {sidebarRoi})");
+        // 兜底1：坐标点击左侧栏第4个图标
+        LogMsg($"步骤1: 坐标点击左侧栏第4个图标 ({sidebarCenterX}, {momentsIconY})");
+        ImageAutomationHelper.ClickScreen(mainWnd, sidebarCenterX, momentsIconY);
+        await Task.Delay(2000, ct);
+        SaveDebugScreenshot(mainWnd, "after_click_sidebar");
+        if (FindMomentsWindow() is IntPtr mw1)
+        {
+            LogMsg("步骤1: 朋友圈窗口已打开");
+            RestoreOwnWindow();
+            return mw1;
+        }
+
+        // 兜底2：稍微上下调整 Y 坐标再试（兼容不同版本/缩放）
+        for (int dy = -20; dy <= 20; dy += 10)
+        {
+            int tryY = momentsIconY + dy;
+            LogMsg($"步骤1a: 尝试坐标 ({sidebarCenterX}, {tryY})");
+            ImageAutomationHelper.ClickScreen(mainWnd, sidebarCenterX, tryY);
+            await Task.Delay(1500, ct);
+            if (FindMomentsWindow() is IntPtr mw2)
+            {
+                LogMsg("步骤1a: 朋友圈窗口已打开");
+                RestoreOwnWindow();
+                return mw2;
+            }
+        }
+
+        // 步骤2：图像识别匹配左侧栏朋友圈图标
+        int sidebarWidth = Math.Min(70, winW);
+        var sidebarRoi = new Rectangle(mainRect.Left, mainRect.Top, sidebarWidth, winH);
+        LogMsg($"步骤2: 图像识别匹配左侧栏朋友圈图标 (ROI: {sidebarRoi})");
         if (TryClickTemplate(mainWnd, config.MomentsIconTemplatePath, sidebarRoi, config.MatchThreshold, "左侧栏朋友圈图标"))
         {
-            LogMsg("步骤1: 图像识别匹配成功");
-            SaveDebugScreenshot(mainWnd, "after_click_moments_icon");
             await Task.Delay(2000, ct);
-            RestoreOwnWindow();
-            IntPtr? mw = FindMomentsWindow();
-            if (mw != null)
+            if (FindMomentsWindow() is IntPtr mw3)
             {
-                LogMsg("步骤1: 朋友圈窗口已打开");
-                return mw;
+                LogMsg("步骤2: 朋友圈窗口已打开");
+                RestoreOwnWindow();
+                return mw3;
             }
-            LogMsg("步骤1: 点击了图标但未检测到朋友圈窗口");
-        }
-        else
-        {
-            LogMsg("步骤1: 图像识别未匹配到");
         }
 
-        // 点击右上角头像
+        // 步骤3：点击右上角头像 → 卡片 → 朋友圈
         int avatarRoiW = (int)(winW * 0.25);
         int avatarRoiH = Math.Min(160, winH);
         var avatarRoi = new Rectangle(mainRect.Right - avatarRoiW, mainRect.Top, avatarRoiW, avatarRoiH);
-        LogMsg($"步骤2: 点击右上角头像 (ROI: {avatarRoi})");
+        LogMsg($"步骤3: 点击右上角头像 (ROI: {avatarRoi})");
         if (TryClickTemplate(mainWnd, config.MyAvatarTemplatePath, avatarRoi, config.MatchThreshold, "右上角头像"))
         {
-            LogMsg("步骤2: 头像匹配成功");
-            SaveDebugScreenshot(mainWnd, "after_click_avatar");
             await Task.Delay(1500, ct);
-
-            // 在弹出的卡片中找 "朋友圈" / "Moments" 点击
-            LogMsg("步骤2a: 在弹出卡片中找朋友圈入口…");
             TryClickInCard(mainWnd, winW, winH);
             await Task.Delay(1500, ct);
-            RestoreOwnWindow();
-            IntPtr? mw = FindMomentsWindow();
-            if (mw != null)
+            if (FindMomentsWindow() is IntPtr mw4)
             {
-                LogMsg("步骤2: 通过头像→卡片→朋友圈路径成功打开");
-                return mw;
+                LogMsg("步骤3: 朋友圈窗口已打开");
+                RestoreOwnWindow();
+                return mw4;
             }
         }
-        else
-        {
-            LogMsg("步骤2: 头像未匹配到");
-        }
 
-        // 兜底：直接坐标点击左侧栏第4个图标
-        LogMsg("兜底: 坐标点击左侧栏朋友圈图标…");
-        int fbX = mainRect.Left + 30;
-        int fbY = mainRect.Top + 210;
-        ImageAutomationHelper.ClickScreen(mainWnd, fbX, fbY);
-        SaveDebugScreenshot(mainWnd, "after_fallback_click");
-        await Task.Delay(2000, ct);
         RestoreOwnWindow();
-        return FindMomentsWindow();
+        throw new InvalidOperationException("未能自动打开朋友圈，请手动打开朋友圈后重试。");
     }
 
     /// <summary>在弹出卡片中通过图像识别找"朋友圈"入口并点击。</summary>

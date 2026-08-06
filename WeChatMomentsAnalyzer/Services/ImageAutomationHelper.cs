@@ -311,12 +311,23 @@ public static class ImageAutomationHelper
     private static void MoveAndClick(int x, int y)
     {
         LogDebug($"MoveAndClick: ({x}, {y})");
-        SetCursorPos(x, y);
-        System.Threading.Thread.Sleep(80);
-        SendMouseDown();
-        System.Threading.Thread.Sleep(60);
-        SendMouseUp();
-        System.Threading.Thread.Sleep(80);
+
+        // 保存当前鼠标位置，点击后恢复，避免长时间占用用户鼠标
+        var original = new POINT();
+        GetCursorPos(ref original);
+        try
+        {
+            SetCursorPos(x, y);
+            System.Threading.Thread.Sleep(80);
+            SendMouseDown();
+            System.Threading.Thread.Sleep(60);
+            SendMouseUp();
+            System.Threading.Thread.Sleep(80);
+        }
+        finally
+        {
+            SetCursorPos(original.X, original.Y);
+        }
     }
 
     private static void LogDebug(string msg)
@@ -402,6 +413,9 @@ public static class ImageAutomationHelper
 
     [DllImport("user32.dll")]
     private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(ref POINT lpPoint);
 
     [DllImport("user32.dll")]
     private static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, int nFlags);
