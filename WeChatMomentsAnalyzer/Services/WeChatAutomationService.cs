@@ -290,36 +290,33 @@ public sealed class WeChatAutomationService
     }
 
     /// <summary>
-    /// 定向滚动联系人列表。微信对单次大滚轮 delta 限幅、且光标悬停列表项时滚动可能失效，
-    /// 故用小步多次滚轮，无效时按策略升级：①列表水平中心 ②列表滚动条带 ③UIA ScrollPattern。
-    /// 滚完把鼠标移回标题栏，清除列表项悬停态。
+    /// 定向滚动联系人列表。默认用旧版验证有效的单次中等滚轮（拆成小步反而使微信平滑滚动动画反复重启、几乎不动）；
+    /// 无效时按策略升级：①单次滚轮 ②UIA ScrollPattern ③点击滚动条轨道翻页。滚轮取列表水平中心，避免落在右侧详情面板。
     /// </summary>
     private async Task ScrollContactsAsync(IntPtr wnd, AutomationElement root, Rectangle wndRect,
         List<ContactItemInfo> items, int level, CancellationToken ct)
     {
         int listLeft = items.Count > 0 ? items.Min(i => i.Rect.Left) : wndRect.Left + 90;
         int listRight = items.Count > 0 ? items.Max(i => i.Rect.Right) : wndRect.Left + 450;
+        int cx = (listLeft + listRight) / 2;
         int sy = wndRect.Top + wndRect.Height / 2;
 
         BringToFront(wnd);
         if (level == 0)
         {
-            ImageAutomationHelper.ScrollScreenBursts(wnd, -WHEEL_DELTA, 6, 120, (listLeft + listRight) / 2, sy);
+            ImageAutomationHelper.ScrollScreen(wnd, -WHEEL_DELTA * 3, cx, sy);
         }
         else if (level == 1)
         {
-            ImageAutomationHelper.ScrollScreenBursts(wnd, -WHEEL_DELTA, 6, 120, listRight - 8, sy);
+            if (!TryScrollPattern(root, new Point(cx, sy)))
+                ImageAutomationHelper.ScrollScreen(wnd, -WHEEL_DELTA * 5, cx, sy);
         }
         else
         {
-            var pt = new Point((listLeft + listRight) / 2, sy);
-            if (!TryScrollPattern(root, pt))
-                ImageAutomationHelper.ScrollScreenBursts(wnd, -WHEEL_DELTA, 10, 100, pt.X, pt.Y);
+            // 点击列表滚动条轨道（拇指下方）触发按页下翻，不依赖滚轮语义
+            ImageAutomationHelper.ClickScreen(wnd, listRight - 4, wndRect.Bottom - 120);
         }
         await Task.Delay(700, ct);
-
-        // 移开鼠标，避免悬停锚定阻碍下一次滚动
-        ImageAutomationHelper.MoveCursor(wndRect.Left + wndRect.Width / 2, wndRect.Top + 16);
     }
 
     /// <summary>尝试用 UIA ScrollPattern 滚动包含指定屏幕点的容器（不依赖鼠标滚轮，免疫悬停/光标问题）。</summary>
