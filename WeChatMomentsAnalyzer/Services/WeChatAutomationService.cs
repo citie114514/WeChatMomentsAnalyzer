@@ -199,9 +199,10 @@ public sealed class WeChatAutomationService
         SaveDebugScreenshot(mainWnd, "main_win");
 
         // 微信左侧栏图标参数（基于客户区左上角）
-        int iconSpacing = 56; // 图标中心间距
-        int firstIconTopOffset = 18; // 第一个图标中心距客户区顶部的距离
-        int sidebarCenterX = clientOrigin.X + 30; // 左侧栏中心
+        // 根据用户反馈调整：图标间距约 64px，第 4 个图标在第 1 个下方约 192px 处
+        int iconSpacing = 64; // 图标中心间距
+        int firstIconTopOffset = 30; // 第一个图标中心距客户区顶部的距离
+        int sidebarCenterX = clientOrigin.X + 28; // 左侧栏中心（偏左一点，避免点到右侧内容区）
         int momentsIconY = clientOrigin.Y + firstIconTopOffset + 3 * iconSpacing; // 第4个图标
 
         // 兜底1：坐标点击左侧栏第4个图标
