@@ -33,14 +33,11 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <NumberBox Grid.Column="0" Header="最大滚动屏数" Minimum="1" Maximum="500" SpinButtonPlacementMode="Compact"
                                    Value="{x:Bind ViewModel.MaxScrollScreens, Mode=TwoWay}"/>
                         <NumberBox Grid.Column="1" Header="每屏等待(ms)" Minimum="300" Maximum="10000" SmallChange="100" SpinButtonPlacementMode="Compact"
                                    Value="{x:Bind ViewModel.ScrollWaitMs, Mode=TwoWay}"/>
-                        <ToggleSwitch Grid.Column="2" Header="仅保存我发布的朋友圈" IsOn="{x:Bind ViewModel.OnlyMine, Mode=TwoWay}"
-                                      OffContent="全部" OnContent="仅我"/>
                     </Grid>
 
                     <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,4,0,0">

@@ -61,15 +61,20 @@ public sealed class ScanConfig
     public int MaxScrollScreens { get; set; } = 50;
     /// <summary>每屏等待毫秒</summary>
     public int ScrollWaitMs { get; set; } = 1200;
-    /// <summary>是否仅扫描我发布的朋友圈</summary>
-    public bool OnlyMine { get; set; } = true;
 
     /// <summary>左侧栏"朋友圈"图标模板路径</summary>
     public string MomentsIconTemplatePath { get; set; } = Path.Combine(AppContext.BaseDirectory, "Templates", "moments_icon.png");
     /// <summary>自己头像模板路径，用于点击右上角头像</summary>
     public string MyAvatarTemplatePath { get; set; } = Path.Combine(AppContext.BaseDirectory, "Templates", "my_avatar.png");
     /// <summary>联系人头像库目录，文件名即昵称</summary>
-    public string ContactAvatarsDirectory { get; set; } = Path.Combine(AppContext.BaseDirectory, "Contacts");
+    public string ContactAvatarsDirectory { get; set; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "WeChatMomentsAnalyzer", "Contacts");
+    /// <summary>朋友圈详情头像保存目录（每条朋友圈一个子目录，目录名为内容指纹）。
+    /// 放在 %LOCALAPPDATA% 短路径下：OpenCV 原生写文件受 MAX_PATH(260) 限制，安装目录可能过长。</summary>
+    public string MomentsAvatarsDirectory { get; set; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "WeChatMomentsAnalyzer", "MomentsAvatars");
     /// <summary>图像匹配相似度阈值（0~1）</summary>
     public double MatchThreshold { get; set; } = 0.55;
     /// <summary>点入朋友圈详情后等待毫秒</summary>

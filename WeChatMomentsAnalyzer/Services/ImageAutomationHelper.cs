@@ -264,6 +264,85 @@ public static class ImageAutomationHelper
 
     public static void SaveDebug(Mat mat, string path) { try { mat.SaveImage(path); } catch { } }
 
+    /// <summary>
+    /// 从详情页点赞/评论区截图中提取近方形的头像块。
+    /// 思路：以四角均值作为背景色，与背景差异明显的连通域视为前景，
+    /// 过滤出尺寸/宽高比接近正方形的块即为头像。
+    /// </summary>
+    public static List<Mat> ExtractSquareAvatars(Mat block, int minSize = 30, int maxSize = 96)
+    {
+        var avatars = new List<Mat>();
+        if (block.Empty() || block.Width < minSize || block.Height < minSize) return avatars;
+
+        try
+        {
+            using var gray = new Mat();
+            Cv2.CvtColor(block, gray, ColorConversionCodes.BGR2GRAY);
+
+            // 背景色取灰度直方图中位数（面板纯色背景占画面多数）。
+            // 四角均值不可靠：截图左缘可能混入窗口其他内容、右侧是窗口底色，会把均值拉偏。
+            using var hist = new Mat();
+            Cv2.CalcHist(new[] { gray }, new[] { 0 }, null, hist, 1, new[] { 256 }, new[] { new Rangef(0, 256) });
+            long total = (long)gray.Rows * gray.Cols;
+            long acc = 0;
+            double bg = 0;
+            for (int i = 0; i < 256; i++)
+            {
+                acc += (long)hist.At<float>(i);
+                if (acc * 2 >= total) { bg = i; break; }
+            }
+
+            using var diff = new Mat();
+            Cv2.Absdiff(gray, new Scalar(bg), diff);
+            using var mask = new Mat();
+            Cv2.Threshold(diff, mask, 25, 255, ThresholdTypes.Binary);
+            using var kernel = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(3, 3));
+            Cv2.MorphologyEx(mask, mask, MorphTypes.Open, kernel);
+            // 闭运算填补头像内部与背景相近的暗洞（黑白照片否则会变空心被面积过滤掉）
+            using var kernelClose = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(7, 7));
+            Cv2.MorphologyEx(mask, mask, MorphTypes.Close, kernelClose);
+
+            using var labels = new Mat();
+            using var stats = new Mat();
+            using var centroids = new Mat();
+            int n = Cv2.ConnectedComponentsWithStats(mask, labels, stats, centroids);
+
+            var boxes = new List<Rect>();
+            for (int i = 1; i < n; i++)
+            {
+                int x = stats.At<int>(i, (int)ConnectedComponentsTypes.Left);
+                int y = stats.At<int>(i, (int)ConnectedComponentsTypes.Top);
+                int w = stats.At<int>(i, (int)ConnectedComponentsTypes.Width);
+                int h = stats.At<int>(i, (int)ConnectedComponentsTypes.Height);
+                int area = stats.At<int>(i, (int)ConnectedComponentsTypes.Area);
+
+                if (w < minSize || h < minSize || w > maxSize || h > maxSize) continue;
+                double ratio = (double)h / w;
+                if (ratio < 0.65 || ratio > 1.55) continue;
+                if (area < w * h * 0.40) continue; // 头像照片是实心的，过滤细线条图标
+                boxes.Add(new Rect(x, y, w, h));
+            }
+
+            // 去掉互相包含的重复块，按从上到下、从左到右排序
+            boxes = boxes
+                .Where(b => !boxes.Any(o => o != b && o.Contains(b)))
+                .OrderBy(b => b.Y).ThenBy(b => b.X)
+                .ToList();
+
+            foreach (var b in boxes)
+            {
+                var r = new Rect(
+                    Math.Max(0, b.X - 2), Math.Max(0, b.Y - 2),
+                    Math.Min(block.Width - Math.Max(0, b.X - 2), b.Width + 4),
+                    Math.Min(block.Height - Math.Max(0, b.Y - 2), b.Height + 4));
+                if (r.Width < minSize || r.Height < minSize) continue;
+                avatars.Add(new Mat(block, r).Clone());
+            }
+        }
+        catch { }
+        return avatars;
+    }
+
     // ====== 真实模拟鼠标/键盘（SendInput） ======
 
     /// <summary>在屏幕坐标处执行真实鼠标左键点击（SendInput）。</summary>

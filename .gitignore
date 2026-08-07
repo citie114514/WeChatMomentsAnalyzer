@@ -21,6 +21,11 @@ packages/
 Debug/
 *.log
 
+# XAML compiler debug leftovers
+TestXamlCompiler*
+xaml_err.txt
+xaml_out.txt
+
 # Windows
 Thumbs.db
 desktop.ini

@@ -18,7 +18,6 @@ public sealed partial class ScanViewModel : ObservableObject
     [ObservableProperty] private string _myNickname = string.Empty;
     [ObservableProperty] private int _maxScrollScreens = 30;
     [ObservableProperty] private int _scrollWaitMs = 1200;
-    [ObservableProperty] private bool _onlyMine = true;
     [ObservableProperty] private bool _isScanning;
     [ObservableProperty] private double _progress;
     [ObservableProperty] private string _statusText = "尚未开始";
@@ -55,8 +54,7 @@ public sealed partial class ScanViewModel : ObservableObject
         {
             MyNickname = MyNickname.Trim(),
             MaxScrollScreens = MaxScrollScreens,
-            ScrollWaitMs = ScrollWaitMs,
-            OnlyMine = OnlyMine
+            ScrollWaitMs = ScrollWaitMs
         };
 
         AppServices.Automation.ProgressChanged -= OnProgress;

@@ -4,11 +4,11 @@
 
 ## 功能
 
-- **扫描朋友圈**：自动打开微信朋友圈、向下滚动、抓取每条朋友圈的发布者、正文、时间、点赞人列表
+- **扫描朋友圈**：自动打开微信朋友圈并进入**个人相册页**，逐屏滚动；跳过"置顶"，对左侧带日期（今天/昨天/M月D日）的条目逐条点入详情，记录发布者、正文、时间，并截取**日期下方的点赞/评论区头像**保存；每条记录完点"返回"回相册继续
 - **按好友查询**：选择/输入好友昵称 → 列出他/她给你点过赞的全部朋友圈（含正文、时间、所有点赞人）
 - **点赞排行榜**：按"给你点赞数"对所有好友排序，一眼看出谁最关注你
 - **MD3 设计语言**：基于 Material Design 3 的明暗配色、TypeScale、形状（CornerRadius）、Card / Button / Chip 样式，跟随系统主题
-- **本地存储**：使用 SQLite（位于 `%LOCALAPPDATA%\WeChatMomentsAnalyzer\moments.db`），支持重复扫描去重
+- **本地存储**：SQLite 位于 `%LOCALAPPDATA%\WeChatMomentsAnalyzer\moments.db`，支持重复扫描去重；详情头像截图位于 `%LOCALAPPDATA%\WeChatMomentsAnalyzer\MomentsAvatars\<内容指纹>\`；扫描日志位于同目录 `scan_log.txt`
 
 ## 技术栈
 
@@ -17,7 +17,8 @@
 | UI | WinUI 3 (Windows App SDK 1.5) + .NET 8 |
 | 设计语言 | Material Design 3（自定义 XAML 资源字典） |
 | MVVM | CommunityToolkit.Mvvm |
-| 微信自动化 | UIAutomation COM（dynamic 后期绑定）+ Win32 P/Invoke |
+| 微信自动化 | FlaUI (UIA3) + Win32 P/Invoke（SendInput 真实点击/滚轮、CopyFromScreen 截图） |
+| 图像 | OpenCvSharp（头像连通域提取） |
 | 存储 | Microsoft.Data.Sqlite + Dapper |
 
 ## 项目结构
@@ -31,7 +32,8 @@ WeChatMomentsAnalyzer/
 ├── Models/MomentPost.cs       数据模型
 ├── Data/MomentsRepository.cs  SQLite 仓储
 ├── Services/
-│   ├── WeChatAutomationService.cs   微信 UI 自动化
+│   ├── WeChatAutomationService.cs   微信 UI 自动化（扫描主链路）
+│   ├── ImageAutomationHelper.cs     截图/点击/滚轮/OpenCV 头像提取
 │   └── AnalysisService.cs           业务查询/排行
 ├── ViewModels/                MVVM ViewModel
 └── Views/                     扫描页/好友查询页/排行榜页
@@ -74,36 +76,38 @@ WeChatMomentsAnalyzer/
 ## 工作原理
 
 ```
-[微信 PC 客户端] ──UIAutomation COM──> [WeChatAutomationService]
-                                              │
-                                              ▼
-                                    ElementFromHandle / FindAll
-                                              │
-                                              ▼
-                                    按坐标聚类 → 解析发布者/正文/点赞人
-                                              │
-                                              ▼
+[微信主窗口] 点头像 → 个人面板 → 点"朋友圈" → [朋友圈窗口·个人相册页]
+                                                    │ 逐屏滚动；跳过置顶；
+                                                    │ 仅选左侧带日期的条目
+                                                    ▼
+                              点击条目图片区(无图点文字区) → [详情页]
+                                                    │ 解析 发布者/正文/时间
+                                                    │ 截图日期下方点赞·评论区
+                                                    │ OpenCV 提取方形头像保存
+                                                    ▼ 点"返回"
                                     [MomentsRepository (SQLite)]
-                                              │
-                            ┌─────────────────┴─────────────────┐
-                            ▼                                   ▼
-                  [按好友查询页]                         [排行榜页]
-        SELECT m.* FROM moments m              SELECT friend, COUNT(*) AS cnt
-        JOIN likes l ON l.moment_id=m.id       FROM likes JOIN moments ...
-        WHERE m.publisher=@me AND l.friend=@f  GROUP BY friend ORDER BY cnt DESC
+                                                    │
+                            ┌───────────────────────┴───────────────────┐
+                            ▼                                           ▼
+                  [按好友查询页]                                 [排行榜页]
 ```
 
 ## 微信 UI 自动化说明
 
-- 窗口类名 `WeChatMainWndForPC` 通过 `EnumWindows` 枚举查找。
-- 朋友圈入口：优先查找 Name 含"朋友圈"且支持 InvokePattern 的元素；失败则按坐标点击侧边栏。
-- 滚动：将鼠标移到朋友圈窗口中央，发送 `MOUSEEVENTF_WHEEL` 滚动一屏。
-- 内容提取：`FindAll(TreeScope_Descendants, TrueCondition)` 收集所有带 Name 的元素，按 `BoundingRectangle.Y` 聚类为单条朋友圈，再用正则区分发布者/时间/正文/点赞人。
+- 微信 4.x 主窗口类名为 `Qt*QWindowIcon`（标题"微信"），旧版 3.x 为 `WeChatMainWndForPC`，均通过 `EnumWindows` + 进程名（`WeChat`/`Weixin`）查找。
+- 朋友圈入口（主路径，每步均验证）：真实点击主窗口左上角头像 → 弹出个人面板（类名以 `QWindowToolSaveBits` 结尾的独立顶层窗口）→ 面板内 UIA 定位"朋友圈"Button 并真实点击（失败用校准坐标兜底）。朋友圈窗口已存在时，该入口会把它导航到个人相册页。
+- 视图判别（UIA）：含 Text"详情"=详情页；含 Text"相册"=个人相册页（扫描目标）；含 List"朋友圈"=信息流页（自动经面板入口切到相册）。
+- 相册条目过滤：ListItem 名称须以日期前缀开头（`今天/昨天/N分钟前/M月D日/…年…月`），跳过"置顶"与签名条；条目须完全位于可视区。
+- 进入详情：优先点条目图片九宫格区（Left+245），失败改点右侧文字区，再失败按 Esc 收起浮层重试；以 Text"详情"出现为进入判据。
+- 详情记录：最长命名的 ListItem 即帖子本体（"发布者 内容 包含N张图片 完整日期时间"），正则解析后按内容指纹去重入库；随后截取帖子（日期行）下方区域，用灰度直方图中位数作背景、连通域+形态学闭运算提取近方形头像，保存到 `MomentsAvatars\<指纹>\`；最后点左上角"返回"回相册。
+- 滚动/点击均为 SendInput 真实硬件事件；扫描期间本程序自动最小化避免遮挡。
 
 ## 注意事项
 
-- **不同微信版本的 UI 树结构存在差异**，启发式解析（坐标聚类 + 正则）在大多数情况下可用，但可能漏抓或误判。可在 `WeChatAutomationService.ParseCluster` 中调整正则。
-- 点赞人列表若被微信渲染为图形而 UIAutomation 拿不到 Name，需要后续接入 OCR 兜底（已预留扩展点）。
+- **不同微信版本的 UI 树结构存在差异**，启发式解析（日期前缀正则 + 详情命名规则）在微信 4.x 上验证可用，但可能漏抓或误判；相关正则集中在 `WeChatAutomationService` 顶部，便于调整。
+- 扫描会真实点击/滚动微信窗口，**扫描期间请勿操作鼠标键盘**；若误入其他页面，程序会尝试按 Esc/点返回恢复。
+- 头像提取依赖截图与 OpenCV 连通域分析，纯色或过暗的头像可能漏检；原始截图（`detail_below_*.png`）会一并保存便于核查。
+- 头像/截图保存路径受 Windows MAX_PATH(260) 限制，故放在 `%LOCALAPPDATA%` 短路径下；请勿把程序部署到极深目录后改回安装目录存储。
 - 程序不会上传任何数据，全部存储在本地 SQLite。
 - 自动化操作微信属于非官方交互，使用风险自负。
 

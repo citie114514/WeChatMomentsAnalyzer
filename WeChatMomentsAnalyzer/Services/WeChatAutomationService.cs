@@ -29,10 +29,29 @@ public sealed class WeChatAutomationService
     private const string MomentsTitleHint = "朋友圈";
     private const byte VK_ESCAPE = 0x1B;
 
+    // 微信 4.x 主窗口布局校准（物理像素，相对窗口左上角）
+    private const int AvatarCenterX = 55;
+    private const int AvatarCenterY = 92;
+    private const int SidebarMomentsX = 55;
+    private const int SidebarMomentsY = 459;
+    // 个人面板内"朋友圈"行校准（相对面板窗口左上角，UIA 定位失败时兜底）
+    private const int PanelMomentsRelX = 245;
+    private const int PanelMomentsRelY = 233;
+
     public event Action<ScanProgress>? ProgressChanged;
     public event Action<string>? Log;
 
-    private void LogMsg(string msg) => Log?.Invoke(msg);
+    // 扫描日志同步落盘，便于离线诊断
+    private static readonly string LogFilePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "WeChatMomentsAnalyzer", "scan_log.txt");
+
+    private void LogMsg(string msg)
+    {
+        Log?.Invoke(msg);
+        try { File.AppendAllText(LogFilePath, DateTime.Now.ToString("HH:mm:ss") + " " + msg + Environment.NewLine); }
+        catch { /* 日志落盘失败不影响扫描 */ }
+    }
 
     private static UIA3Automation CreateAutomation() => new();
 
@@ -55,46 +74,87 @@ public sealed class WeChatAutomationService
 
         // 扫描期间最小化本程序，避免遮挡微信
         MinimizeOwnWindow();
-        BringToFront(mainWnd.Value);
+        BringToFront(momentsWnd.Value);
         await Task.Delay(300, ct);
 
-        var targetWnd = mainWnd.Value;
+        var targetWnd = momentsWnd.Value;
         using var automation = CreateAutomation();
         var momentsEl = automation.FromHandle(targetWnd);
 
-        var contacts = ImageAutomationHelper.LoadContactTemplates(config.ContactAvatarsDirectory);
         try
         {
-            var seenHashes = new HashSet<string>();
+            // 相册页可能停留在上次会话的中间/底部：先滚回顶部再开始扫描
+            if (!IsDetailView(momentsEl) && !IsFeedView(momentsEl))
+            {
+                LogMsg("相册滚回顶部…");
+                BringToFront(targetWnd);
+                GetClientRect(targetWnd, out RECT topRc);
+                // 单次大滚轮会被微信限幅，分多次小步滚到顶
+                for (int i = 0; i < 10; i++)
+                {
+                    ImageAutomationHelper.ScrollClient(targetWnd, WHEEL_DELTA * 6, topRc.Right / 2, topRc.Bottom / 2);
+                    await Task.Delay(200, ct);
+                }
+                await Task.Delay(800, ct);
+            }
+
+            var seenHashes = new HashSet<string>(StringComparer.Ordinal);
             int totalScreens = 0;
             int totalMoments = 0;
+            int totalAvatars = 0;
+            int emptyStreak = 0;
+            string prevScreenFingerprint = string.Empty;
 
             while (totalScreens < config.MaxScrollScreens)
             {
                 ct.ThrowIfCancellationRequested();
                 totalScreens++;
-                var candidates = ExtractVisibleMoments(momentsEl, config, targetWnd);
+
+                // 若停留在详情页，先返回列表
+                if (IsDetailView(momentsEl))
+                    await GoBackToListAsync(momentsEl, targetWnd, ct);
+
+                // 若停在朋友圈信息流页：通过主窗口面板入口把朋友圈窗口导航到个人相册页
+                if (IsFeedView(momentsEl))
+                {
+                    LogMsg("当前在朋友圈信息流页，通过面板入口切换到个人相册…");
+                    await TryOpenMomentsViaPanelAsync(mainWnd.Value, ct);
+                    BringToFront(targetWnd);
+                    await WaitViewAsync(momentsEl, detail: false, 3000, ct);
+                }
+
+                var items = GetListPageItems(momentsEl, targetWnd);
+                if (items.Count == 0)
+                {
+                    emptyStreak++;
+                    if (emptyStreak >= 3)
+                    {
+                        LogMsg("连续多屏未发现带日期的相册条目，结束扫描。");
+                        break;
+                    }
+                    LogMsg($"第 {totalScreens} 屏：未发现新的相册条目，继续滚动…");
+                }
+                else
+                {
+                    emptyStreak = 0;
+                }
+
+                string fingerprint = string.Join("|", items.Select(i => i.Name));
                 int screenCount = 0;
 
-                foreach (var cand in candidates)
+                foreach (var item in items)
                 {
-                    var m = cand.Post;
-                    if (string.IsNullOrEmpty(m.ContentHash)) continue;
-                    if (!seenHashes.Add(m.ContentHash)) continue;
+                    ct.ThrowIfCancellationRequested();
+                    var key = ComputeHash(item.Name);
+                    if (!seenHashes.Add(key)) continue;
 
-                    if (config.OnlyMine && !string.IsNullOrEmpty(config.MyNickname)
-                        && !m.Publisher.Equals(config.MyNickname, StringComparison.Ordinal))
-                        continue;
-
-                    // 点入详情，通过头像匹配识别点赞人
-                    var avatarLikers = await ScanLikersInDetailAsync(targetWnd, cand, config, contacts, ct);
-                    foreach (var name in avatarLikers)
-                        if (!m.Likers.Contains(name, StringComparer.Ordinal))
-                            m.Likers.Add(name);
-
-                    repo.UpsertMoment(m);
-                    totalMoments++;
-                    screenCount++;
+                    var saved = await ScanOneMomentAsync(targetWnd, momentsEl, item, config, repo, ct);
+                    if (saved != null)
+                    {
+                        totalMoments++;
+                        totalAvatars += saved.Value;
+                        screenCount++;
+                    }
                 }
 
                 ProgressChanged?.Invoke(new ScanProgress
@@ -104,24 +164,22 @@ public sealed class WeChatAutomationService
                     MomentsThisScreen = screenCount,
                     MomentsTotal = totalMoments
                 });
-                LogMsg($"第 {totalScreens} 屏：抓到 {screenCount} 条，累计 {totalMoments} 条");
+                LogMsg($"第 {totalScreens} 屏：新入库 {screenCount} 条，累计 {totalMoments} 条，头像 {totalAvatars} 个");
 
-                bool advanced = await ScrollDownOneScreenAsync(targetWnd, config.ScrollWaitMs, ct);
-                if (!advanced)
+                if (fingerprint == prevScreenFingerprint && totalScreens > 1)
                 {
-                    LogMsg("已到达朋友圈顶部或滚动失败，结束扫描。");
+                    LogMsg("滚动后内容未变化，已到达底部，结束扫描。");
                     break;
                 }
+                prevScreenFingerprint = fingerprint;
+
+                await ScrollDownOneScreenAsync(targetWnd, config.ScrollWaitMs, ct);
             }
 
-            LogMsg($"扫描完成：共 {totalScreens} 屏，{totalMoments} 条朋友圈入库。");
+            LogMsg($"扫描完成：共 {totalScreens} 屏，{totalMoments} 条朋友圈入库，记录头像 {totalAvatars} 个。");
         }
         finally
         {
-            foreach (var mat in contacts.Values)
-            {
-                try { mat.Dispose(); } catch { }
-            }
             RestoreOwnWindow();
         }
     }
@@ -143,6 +201,21 @@ public sealed class WeChatAutomationService
             {
                 found = h;
                 return false;
+            }
+
+            // 微信 4.x：Qt 主窗口，标题恰为"微信"（朋友圈窗口标题为"朋友圈"，不会误认）
+            if (className.StartsWith("Qt", StringComparison.Ordinal) && className.EndsWith("QWindowIcon", StringComparison.Ordinal))
+            {
+                var tSb = new StringBuilder(256);
+                GetWindowText(h, tSb, tSb.Capacity);
+                string t = tSb.ToString();
+                if ((t == "\u5fae\u4fe1" || t == "Weixin" || t == "WeChat")
+                    && GetWindowProcessName(h) is string pn && WeChatProcessNames.Contains(pn))
+                {
+                    found = h;
+                    return false;
+                }
+                return true;
             }
 
             var titleSb = new StringBuilder(256);
@@ -177,126 +250,264 @@ public sealed class WeChatAutomationService
     // ====== 打开朋友圈 ======
 
     /// <summary>
-    /// 打开朋友圈：优先坐标兜底，再尝试图像识别。
-    /// 坐标根据微信窗口左侧栏图标排列动态计算。
+    /// 打开朋友圈。微信 4.x 主路径：点击左上角头像 → 在弹出的个人面板中点击"朋友圈"；
+    /// 回退路径：侧边栏朋友圈图标真实点击 → UIA Invoke → 模板匹配（旧版微信）。
+    /// 每一步都先验证朋友圈窗口确实出现，避免误触其他入口。
     /// </summary>
     private async Task<IntPtr?> OpenMomentsAsync(IntPtr mainWnd, ScanConfig config, CancellationToken ct)
     {
-        IntPtr? existing = FindMomentsWindow();
-        if (existing != null) return existing;
+        if (FindMomentsWindow() is IntPtr already) return already;
 
         MinimizeOwnWindow();
         BringToFront(mainWnd);
-        await Task.Delay(1200, ct);
-
-        // 用客户区左上角作为坐标基准，避免标题栏/边框带来的偏移
-        GetWindowRect(mainWnd, out RECT mainRect);
-        int winW = mainRect.Right - mainRect.Left;
-        int winH = mainRect.Bottom - mainRect.Top;
-        var clientOrigin = new POINT { X = 0, Y = 0 };
-        ClientToScreen(mainWnd, ref clientOrigin);
+        var rect = await WaitForStableRectAsync(mainWnd, ct);
 
         SaveDebugScreenshot(mainWnd, "main_win");
 
-        // 微信左侧栏图标参数（基于客户区左上角）
-        // 根据用户反馈调整：图标间距约 64px，第 4 个图标在第 1 个下方约 192px 处
-        int iconSpacing = 64; // 图标中心间距
-        int firstIconTopOffset = 30; // 第一个图标中心距客户区顶部的距离
-        int sidebarCenterX = clientOrigin.X + 28; // 左侧栏中心（偏左一点，避免点到右侧内容区）
-        int momentsIconY = clientOrigin.Y + firstIconTopOffset + 3 * iconSpacing; // 第4个图标
-
-        // 兜底1：坐标点击左侧栏第4个图标
-        LogMsg($"步骤1: 坐标点击左侧栏第4个图标 ({sidebarCenterX}, {momentsIconY})");
-        ImageAutomationHelper.ClickScreen(mainWnd, sidebarCenterX, momentsIconY);
-        await Task.Delay(2000, ct);
-        SaveDebugScreenshot(mainWnd, "after_click_sidebar");
-        if (FindMomentsWindow() is IntPtr mw1)
+        // 1) 微信 4.x：左上角头像 → 个人面板"朋友圈"（打开/导航到个人相册页）
+        if (await TryOpenMomentsViaPanelAsync(mainWnd, ct))
         {
-            LogMsg("步骤1: 朋友圈窗口已打开");
-            RestoreOwnWindow();
-            return mw1;
-        }
-
-        // 兜底2：稍微上下调整 Y 坐标再试（兼容不同版本/缩放）
-        for (int dy = -30; dy <= 30; dy += 15)
-        {
-            int tryY = momentsIconY + dy;
-            LogMsg($"步骤1a: 尝试坐标 ({sidebarCenterX}, {tryY})");
-            ImageAutomationHelper.ClickScreen(mainWnd, sidebarCenterX, tryY);
-            await Task.Delay(1500, ct);
-            if (FindMomentsWindow() is IntPtr mw2)
+            if (VerifyMomentsOpened(mainWnd, out var wnd))
             {
-                LogMsg("步骤1a: 朋友圈窗口已打开");
                 RestoreOwnWindow();
-                return mw2;
+                return wnd;
             }
         }
 
-        // 步骤2：图像识别匹配左侧栏朋友圈图标
-        int sidebarWidth = Math.Min(70, winW);
-        var sidebarRoi = new Rectangle(clientOrigin.X, clientOrigin.Y, sidebarWidth, winH);
-        LogMsg($"步骤2: 图像识别匹配左侧栏朋友圈图标 (ROI: {sidebarRoi})");
-        if (TryClickTemplate(mainWnd, config.MomentsIconTemplatePath, sidebarRoi, config.MatchThreshold, "左侧栏朋友圈图标"))
+        // 关闭可能残留的面板，避免遮挡后续点击
+        ImageAutomationHelper.PostKey(mainWnd, VK_ESCAPE);
+        await Task.Delay(400, ct);
+
+        // 2) 侧边栏朋友圈图标真实点击（微信 4.x 侧边栏固定位置）
+        LogMsg("尝试点击侧边栏朋友圈图标…");
+        ImageAutomationHelper.ClickScreen(mainWnd, rect.Left + SidebarMomentsX, rect.Top + SidebarMomentsY);
+        await Task.Delay(1800, ct);
+        if (VerifyMomentsOpened(mainWnd, out var wnd2))
+        {
+            RestoreOwnWindow();
+            return wnd2;
+        }
+
+        // 3) UIA Invoke（旧版微信）
+        if (TryInvokeMomentsControl(mainWnd))
         {
             await Task.Delay(2000, ct);
-            if (FindMomentsWindow() is IntPtr mw3)
+            if (VerifyMomentsOpened(mainWnd, out var wnd3))
             {
-                LogMsg("步骤2: 朋友圈窗口已打开");
                 RestoreOwnWindow();
-                return mw3;
+                return wnd3;
             }
         }
 
-        // 步骤3：点击右上角头像 → 卡片 → 朋友圈
-        int avatarRoiW = (int)(winW * 0.25);
-        int avatarRoiH = Math.Min(160, winH);
-        var avatarRoi = new Rectangle(mainRect.Right - avatarRoiW, mainRect.Top, avatarRoiW, avatarRoiH);
-        LogMsg($"步骤3: 点击右上角头像 (ROI: {avatarRoi})");
-        if (TryClickTemplate(mainWnd, config.MyAvatarTemplatePath, avatarRoi, config.MatchThreshold, "右上角头像"))
+        // 4) 侧边栏模板匹配（旧版微信），仅在侧边栏区域且高置信度时使用
+        int sidebarWidth = Math.Min(70, rect.Right - rect.Left);
+        var sidebarRoi = new Rectangle(rect.Left, rect.Top, sidebarWidth, rect.Bottom - rect.Top);
+        const double safeTemplateThreshold = 0.80;
+        if (TryClickTemplate(mainWnd, config.MomentsIconTemplatePath, sidebarRoi,
+            Math.Max(config.MatchThreshold, safeTemplateThreshold), "Moments sidebar icon"))
         {
-            await Task.Delay(1500, ct);
-            TryClickInCard(mainWnd, winW, winH);
-            await Task.Delay(1500, ct);
-            if (FindMomentsWindow() is IntPtr mw4)
+            await Task.Delay(2000, ct);
+            if (VerifyMomentsOpened(mainWnd, out var wnd4))
             {
-                LogMsg("步骤3: 朋友圈窗口已打开");
                 RestoreOwnWindow();
-                return mw4;
+                return wnd4;
             }
         }
 
+        LogMsg("Moments entry was not verified. Automatic clicks stopped safely.");
         RestoreOwnWindow();
-        throw new InvalidOperationException("未能自动打开朋友圈，请手动打开朋友圈后重试。");
+        return null;
     }
 
-    /// <summary>在弹出卡片中通过图像识别找"朋友圈"入口并点击。</summary>
-    private void TryClickInCard(IntPtr mainWnd, int winW, int winH)
+    /// <summary>
+    /// 微信 4.x：点击主窗口左上角头像弹出个人面板，再点击面板内"朋友圈"。
+    /// 朋友圈窗口已存在时，该入口会把它导航到个人相册页（扫描目标页）。
+    /// </summary>
+    private async Task<bool> TryOpenMomentsViaPanelAsync(IntPtr mainWnd, CancellationToken ct)
+    {
+        MinimizeOwnWindow();
+        BringToFront(mainWnd);
+        var rect = await WaitForStableRectAsync(mainWnd, ct);
+
+        LogMsg("点击左上角头像，打开个人面板…");
+        ImageAutomationHelper.ClickScreen(mainWnd, rect.Left + AvatarCenterX, rect.Top + AvatarCenterY);
+        await Task.Delay(1000, ct);
+
+        var panelWnd = FindPanelWindow();
+        if (panelWnd == null)
+        {
+            LogMsg("个人面板未弹出。");
+            return false;
+        }
+
+        GetWindowRect(panelWnd.Value, out RECT panelRect);
+        var pt = FindMomentsClickPointInPanel(panelWnd.Value)
+                 ?? new Point(panelRect.Left + PanelMomentsRelX, panelRect.Top + PanelMomentsRelY);
+        LogMsg($"点击面板内朋友圈入口 ({pt.X}, {pt.Y})");
+        ImageAutomationHelper.ClickScreen(mainWnd, pt.X, pt.Y);
+        await Task.Delay(1800, ct);
+        return true;
+    }
+
+    /// <summary>等待窗口恢复动画结束，返回稳定的窗口矩形。</summary>
+    private static async Task<RECT> WaitForStableRectAsync(IntPtr hWnd, CancellationToken ct)
+    {
+        GetWindowRect(hWnd, out RECT prev);
+        for (int i = 0; i < 10; i++)
+        {
+            await Task.Delay(250, ct);
+            GetWindowRect(hWnd, out RECT cur);
+            if (cur.Left == prev.Left && cur.Top == prev.Top && cur.Right == prev.Right && cur.Bottom == prev.Bottom)
+                return cur;
+            prev = cur;
+        }
+        return prev;
+    }
+
+    /// <summary>微信 4.x 点击头像后弹出的个人面板（独立顶层窗口，类名以 QWindowToolSaveBits 结尾）。</summary>
+    private static IntPtr? FindPanelWindow()
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, _) =>
+        {
+            if (!IsWindowVisible(h)) return true;
+            var sb = new StringBuilder(256);
+            GetClassName(h, sb, sb.Capacity);
+            if (sb.ToString().EndsWith("QWindowToolSaveBits", StringComparison.Ordinal)
+                && GetWindowProcessName(h) is string p && WeChatProcessNames.Contains(p))
+            {
+                found = h;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found == IntPtr.Zero ? null : found;
+    }
+
+    /// <summary>
+    /// 在个人面板内定位"朋友圈"入口点击点：优先右侧缩略图宽 Button，
+    /// 其次"朋友圈"文本右侧（整行均可点击）。
+    /// </summary>
+    private Point? FindMomentsClickPointInPanel(IntPtr panelWnd)
     {
         try
         {
-            GetWindowRect(mainWnd, out RECT rc);
-            // 弹窗通常在头像下方，截取窗口下半部分
-            int cardY = rc.Top + 40;
-            int cardH = winH - 40;
-            var cardRoi = new Rectangle(rc.Left, cardY, winW, cardH);
-            using var cardMat = ImageAutomationHelper.CaptureRegion(cardRoi);
-            ImageAutomationHelper.SaveDebug(cardMat, Path.Combine(ImageAutomationHelper.DebugDirectory, "card_roi.png"));
+            using var automation = CreateAutomation();
+            var root = automation.FromHandle(panelWnd);
+            Point? label = null;
+            foreach (var el in root.FindAllDescendants())
+            {
+                string name;
+                try { name = el.Name; }
+                catch { continue; }
 
-            // 用 OCR 思路：直接滑动找 "朋友圈"/"Moments" 文字区域
-            // 这里简化：点击卡片中央偏下位置（朋友圈通常在左侧栏弹出的卡片中）
-            // 实际上微信点击头像后弹出的卡片，朋友圈入口在卡片中下部
-            int clickX = rc.Left + winW / 2;
-            int clickY = cardY + (int)(cardH * 0.65);
-            LogMsg($"  尝试点击卡片中朋友圈入口 ({clickX}, {clickY})");
-            ImageAutomationHelper.ClickScreen(mainWnd, clickX, clickY);
+                var r = el.BoundingRectangle;
+                if (r.Width <= 0 || r.Height <= 0) continue;
+
+                if (string.Equals(name, "\u670b\u53cb\u5708", StringComparison.Ordinal))
+                    label ??= new Point(r.Left + r.Width / 2, r.Top + r.Height / 2);
+
+                // 缩略图行是一个宽 Button，点击必然打开朋友圈
+                if (el.ControlType == FlaUI.Core.Definitions.ControlType.Button && r.Width >= 150 && r.Height >= 40)
+                    return new Point(r.Left + r.Width / 2, r.Top + r.Height / 2);
+            }
+            if (label.HasValue) return new Point(label.Value.X + 180, label.Value.Y + 15);
         }
         catch (Exception ex)
         {
-            LogMsg($"  卡片点击失败: {ex.Message}");
+            LogMsg("UIA 定位面板朋友圈入口失败: " + ex.Message);
+        }
+        return null;
+    }
+
+    /// <summary>验证朋友圈是否打开：独立窗口或主窗口内嵌页面。</summary>
+    private bool VerifyMomentsOpened(IntPtr mainWnd, out IntPtr momentsWnd)
+    {
+        if (FindMomentsWindow() is IntPtr m)
+        {
+            LogMsg($"朋友圈窗口已打开：0x{m.ToInt64():X}");
+            momentsWnd = m;
+            return true;
+        }
+        if (IsMomentsPageVisibleInMainWindow(mainWnd))
+        {
+            momentsWnd = mainWnd;
+            return true;
+        }
+        momentsWnd = IntPtr.Zero;
+        return false;
+    }
+
+    private bool TryInvokeMomentsControl(IntPtr mainWnd)
+    {
+        try
+        {
+            using var automation = CreateAutomation();
+            var root = automation.FromHandle(mainWnd);
+            foreach (var element in root.FindAllDescendants())
+            {
+                string name;
+                try { name = element.Name; }
+                catch { continue; }
+
+                if (string.IsNullOrWhiteSpace(name) ||
+                    !name.Contains("\u670b\u53cb\u5708", StringComparison.Ordinal))
+                    continue;
+
+                var invokePattern = element.Patterns.Invoke.PatternOrDefault;
+                if (invokePattern == null) continue;
+
+                LogMsg($"UI Automation found Moments control: {name}");
+                invokePattern.Invoke();
+                return true;
+            }
+
+            LogMsg("UI Automation did not expose a callable Moments control.");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            LogMsg($"UI Automation could not invoke Moments: {ex.Message}");
+            return false;
         }
     }
 
-    /// <summary>保存窗口当前截图用于调试。</summary>
+    private bool IsMomentsPageVisibleInMainWindow(IntPtr mainWnd)
+    {
+        try
+        {
+            using var automation = CreateAutomation();
+            var root = automation.FromHandle(mainWnd);
+            var rootRect = root.BoundingRectangle;
+            foreach (var element in root.FindAllDescendants())
+            {
+                string name;
+                try { name = element.Name; }
+                catch { continue; }
+
+                if (!string.Equals(name?.Trim(), "\u670b\u53cb\u5708", StringComparison.Ordinal))
+                    continue;
+
+                var rect = element.BoundingRectangle;
+                if (rect.Width <= 0 || rect.Height <= 0)
+                    continue;
+
+                // The sidebar entry is on the far left; the page title/content appears in the main area.
+                if (rect.Left > rootRect.Left + 120 && rect.Top > rootRect.Top + 20)
+                {
+                    LogMsg("Moments page is visible in the main WeChat window.");
+                    return true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMsg($"Could not verify embedded Moments page: {ex.Message}");
+        }
+
+        return false;
+    }
+
     private void SaveDebugScreenshot(IntPtr wnd, string suffix)
     {
         try
@@ -357,214 +568,418 @@ public sealed class WeChatAutomationService
         IntPtr found = IntPtr.Zero;
         EnumWindows((h, _) =>
         {
+            if (!IsWindowVisible(h)) return true;
+
+            var title = new StringBuilder(256);
+            GetWindowText(h, title, title.Capacity);
+            if (!title.ToString().Contains(MomentsTitleHint)) return true;
+
             var sb = new StringBuilder(256);
             GetClassName(h, sb, sb.Capacity);
-            if (WeChatMainClasses.Contains(sb.ToString()) && IsWindowVisible(h))
+            string cls = sb.ToString();
+            if (WeChatMainClasses.Contains(cls))
             {
-                var title = new StringBuilder(256);
-                GetWindowText(h, title, title.Capacity);
-                if (title.ToString().Contains(MomentsTitleHint))
-                {
-                    found = h;
-                    return false;
-                }
+                found = h;
+                return false;
+            }
+
+            // 微信 4.x：Qt 窗口 + 微信进程（按进程名排除本程序等其他窗口）
+            if (cls.StartsWith("Qt", StringComparison.Ordinal)
+                && GetWindowProcessName(h) is string p && WeChatProcessNames.Contains(p))
+            {
+                found = h;
+                return false;
             }
             return true;
         }, IntPtr.Zero);
         return found == IntPtr.Zero ? null : found;
     }
 
-    // ====== 朋友圈内容提取 ======
+    // ====== 朋友圈内容提取（微信 4.x：列表 ListItem → 点入详情） ======
 
-    private class MomentCandidate
+    private record struct ListItemInfo(string Name, Rectangle Rect);
+
+    private static readonly Regex DetailTimeRegex = new(@"\d{4}年\d{1,2}月\d{1,2}日\s*\d{1,2}:\d{2}");
+    private static readonly Regex MediaPhraseRegex = new(@"包含\d+(张图片|段视频|个视频|张图文)");
+    // 个人相册页（扫描目标页）条目以左侧日期开头："8月04 04 内容…"/"今天 …"/"昨天 …"；
+    // "置顶"与个性签名等条目不以日期开头，用此前缀正则排除
+    private static readonly Regex AlbumItemDatePrefixRegex = new(@"^(\d{1,2}月\d{1,2}|\d{4}年\d{1,2}月\d{1,2}|\d+\s*(分钟|小时|天)前|昨天|今天)");
+
+    /// <summary>读取朋友圈列表页中完整可见的 ListItem（每条朋友圈一个，名称含日期和内容摘要）。</summary>
+    private List<ListItemInfo> GetListPageItems(AutomationElement root, IntPtr wnd)
     {
-        public MomentPost Post { get; set; } = new();
-        public Point ClickCenter { get; set; }
-        public Rectangle Bounds { get; set; }
-    }
-
-    private List<MomentCandidate> ExtractVisibleMoments(AutomationElement momentsEl, ScanConfig config, IntPtr wnd)
-    {
-        var result = new List<MomentCandidate>();
-        var items = new List<(Rectangle Rect, string Name)>();
-
+        var result = new List<ListItemInfo>();
         try
         {
-            var all = momentsEl.FindAllDescendants();
-            foreach (var el in all)
-            {
-                string? name;
-                try { name = el.Name; } catch { continue; }
-                if (string.IsNullOrWhiteSpace(name)) continue;
+            GetWindowRect(wnd, out RECT rc);
+            var wndRect = new Rectangle(rc.Left, rc.Top, rc.Right - rc.Left, rc.Bottom - rc.Top);
 
-                var rect = el.BoundingRectangle;
-                if (rect.Width <= 0 || rect.Height <= 0) continue;
-                items.Add((rect, name));
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var el in root.FindAllDescendants())
+            {
+                try
+                {
+                    if (el.ControlType != FlaUI.Core.Definitions.ControlType.ListItem) continue;
+                    var r = el.BoundingRectangle;
+                    if (r.Width <= 0 || r.Height <= 0) continue;
+
+                    // 只保留完整落在窗口内的条目（工具栏高约 72px）
+                    if (r.Top < wndRect.Top + 72 || r.Bottom > wndRect.Bottom - 10) continue;
+
+                    string name;
+                    try { name = el.Name?.Trim() ?? string.Empty; } catch { continue; }
+                    if (string.IsNullOrEmpty(name)) continue;
+                    // 真正的条目名称含日期+内容摘要；过滤"置顶"等徽章小元素
+                    if (name.Length < 8) continue;
+                    // 跳过"置顶"条目
+                    if (name.StartsWith("\u7f6e\u9876", StringComparison.Ordinal)) continue;
+                    // 必须以左侧日期开头（今天/昨天/M月D日…），排除签名等非朋友圈条目
+                    if (!AlbumItemDatePrefixRegex.IsMatch(name)) continue;
+                    if (!seen.Add(name)) continue; // UIA 偶尔重复暴露同一 ListItem
+
+                    result.Add(new ListItemInfo(name, r));
+                }
+                catch { }
             }
         }
         catch (Exception ex)
         {
-            LogMsg("提取可见朋友圈失败: " + ex.Message);
-            return result;
+            LogMsg("读取朋友圈列表失败: " + ex.Message);
         }
-
-        if (items.Count == 0) return result;
-
-        items.Sort((a, b) => a.Rect.Top.CompareTo(b.Rect.Top));
-        const int clusterGap = 60;
-        var clusters = new List<List<(Rectangle Rect, string Name)>>();
-        var current = new List<(Rectangle Rect, string Name)> { items[0] };
-        for (int i = 1; i < items.Count; i++)
-        {
-            if (items[i].Rect.Top - items[i - 1].Rect.Top > clusterGap)
-            {
-                clusters.Add(current);
-                current = new List<(Rectangle Rect, string Name)> { items[i] };
-            }
-            else current.Add(items[i]);
-        }
-        clusters.Add(current);
-
-        foreach (var c in clusters)
-        {
-            if (ParseCluster(c, out var post, out var bounds))
-            {
-                int cx = bounds.X + bounds.Width / 2;
-                int cy = bounds.Y + bounds.Height / 2;
-                result.Add(new MomentCandidate
-                {
-                    Post = post,
-                    Bounds = bounds,
-                    ClickCenter = new Point(cx, cy)
-                });
-            }
-        }
-        return result;
+        return result.OrderBy(i => i.Rect.Top).ToList();
     }
 
-    private static bool ParseCluster(List<(Rectangle Rect, string Name)> cluster, out MomentPost post, out Rectangle bounds)
+    /// <summary>是否处于详情页（标题区出现"详情"二字）。</summary>
+    private static bool IsDetailView(AutomationElement root)
+        => FindElementByName(root, "\u8be6\u60c5") != null;
+
+    /// <summary>是否处于个人相册列表页（标题区出现"相册"二字，即扫描目标页）。</summary>
+    private static bool IsListView(AutomationElement root)
+        => FindElementByName(root, "\u76f8\u518c") != null;
+
+    /// <summary>是否处于朋友圈信息流页（存在名为"朋友圈"的 List 控件）。</summary>
+    private static bool IsFeedView(AutomationElement root)
     {
-        post = new MomentPost();
-        bounds = Rectangle.Empty;
-        if (cluster.Count == 0) return false;
-
-        bounds = cluster[0].Rect;
-        for (int i = 1; i < cluster.Count; i++)
-            bounds = Rectangle.Union(bounds, cluster[i].Rect);
-
-        string publisher = string.Empty;
-        string content = string.Empty;
-        string? postTime = null;
-        var likers = new List<string>();
-
-        var timeRegex = new Regex(@"^\s*(\d+\s*(分钟|小时|天)前|昨天|前天|\d{1,2}月\d{1,2}日|\d{4}年|\d{1,2}:\d{2})");
-        var likerRegex = new Regex("[，、,]");
-
-        var sorted = cluster.OrderBy(x => x.Rect.Top).ThenBy(x => x.Rect.Left).ToList();
-
-        foreach (var item in sorted)
+        try
         {
-            var n = item.Name.Trim();
-            if (string.IsNullOrEmpty(n)) continue;
-
-            if (timeRegex.IsMatch(n) && postTime == null) { postTime = n; continue; }
-            if (publisher.Length == 0 && n.Length <= 24 && !n.Contains('\n') && !likerRegex.IsMatch(n))
-            { publisher = n; continue; }
-            if (likerRegex.IsMatch(n) && n.Length <= 80 && !n.Contains('。'))
+            foreach (var el in root.FindAllDescendants())
             {
-                var parts = likerRegex.Split(n).Select(p => p.Trim()).Where(p => p.Length > 0).ToList();
-                if (parts.Count >= 1 && parts.All(p => p.Length <= 20)) { likers.AddRange(parts); continue; }
+                try
+                {
+                    if (el.ControlType != FlaUI.Core.Definitions.ControlType.List) continue;
+                    if (string.Equals(el.Name?.Trim(), "\u670b\u53cb\u5708", StringComparison.Ordinal)) return true;
+                }
+                catch { }
             }
-            if (content.Length == 0) content = n;
-            else content += "\n" + n;
         }
-
-        if (string.IsNullOrEmpty(publisher) && string.IsNullOrEmpty(content)) return false;
-
-        post.Publisher = publisher;
-        post.Content = content.Trim();
-        post.ScanTime = DateTime.Now;
-        post.Likers = likers.Distinct(StringComparer.Ordinal).ToList();
-        post.ContentHash = ComputeHash($"{publisher}|{content}|{postTime ?? ""}");
-        if (postTime != null) post.PostTime = TryParseTime(postTime);
-        return true;
+        catch { }
+        return false;
     }
 
-    // ====== 点赞识别 ======
+    private static FlaUI.Core.AutomationElements.AutomationElement? FindElementByName(AutomationElement root, string name)
+    {
+        try
+        {
+            foreach (var el in root.FindAllDescendants())
+            {
+                string n;
+                try { n = el.Name; } catch { continue; }
+                if (string.Equals(n?.Trim(), name, StringComparison.Ordinal)) return el;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static Point? FindButtonCenterByName(AutomationElement root, string name)
+    {
+        try
+        {
+            foreach (var el in root.FindAllDescendants())
+            {
+                try
+                {
+                    if (el.ControlType != FlaUI.Core.Definitions.ControlType.Button) continue;
+                    if (!string.Equals(el.Name?.Trim(), name, StringComparison.Ordinal)) continue;
+                    var r = el.BoundingRectangle;
+                    if (r.Width <= 0 || r.Height <= 0) continue;
+                    return new Point(r.Left + r.Width / 2, r.Top + r.Height / 2);
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return null;
+    }
 
     /// <summary>
-    /// 点入单条朋友圈详情，滚动识别点赞头像，然后返回。
+    /// 扫描一条朋友圈：点击列表条目进入详情 → 解析发布者/内容/日期 →
+    /// 记录日期下方（点赞/评论区）的头像 → 点击左上角"返回"回到列表。
+    /// 返回值为本条记录的头像数；失败返回 null。
     /// </summary>
-    private async Task<List<string>> ScanLikersInDetailAsync(
-        IntPtr wnd, MomentCandidate candidate, ScanConfig config,
-        Dictionary<string, Mat> contacts, CancellationToken ct)
+    private async Task<int?> ScanOneMomentAsync(
+        IntPtr wnd, AutomationElement root, ListItemInfo item,
+        ScanConfig config, MomentsRepository repo, CancellationToken ct)
     {
-        var found = new HashSet<string>(StringComparer.Ordinal);
-        if (contacts.Count == 0) return found.ToList();
-
-        // 确保微信在前台
-        BringToFront(wnd);
-        await Task.Delay(200, ct);
-
-        // 点击该条朋友圈中心
-        ImageAutomationHelper.ClickScreen(wnd, candidate.ClickCenter.X, candidate.ClickCenter.Y);
-        await Task.Delay(config.DetailOpenWaitMs, ct);
-
-        int emptyStreak = 0;
-        for (int i = 0; i < config.DetailMaxScrolls; i++)
+        try
         {
-            ct.ThrowIfCancellationRequested();
-            await Task.Delay(600, ct);
-
-            // 前台截图
-            var (mat, bounds) = CaptureWindowForeground(wnd);
-            using (mat)
+            // 1) 点入详情。相册条目布局：左侧日期、中间图片九宫格、右侧文字。
+            //    优先点击图片区进入详情；无图条目该位置落在文字上同样可进入。
+            int imgX = item.Rect.Left + 245;
+            int imgY = item.Rect.Top + Math.Max(60, item.Rect.Height / 2);
+            if (!await TryEnterDetailAsync(wnd, root, imgX, imgY, config, ct))
             {
-                int roiY = bounds.Y + (int)(bounds.Height * 0.45);
-                int roiH = bounds.Bottom - roiY;
-                var roi = new Rectangle(bounds.X, roiY, bounds.Width, roiH);
-                var matches = ImageAutomationHelper.MatchContacts(mat, contacts, config.MatchThreshold, roi);
-
-                int newCount = 0;
-                foreach (var (name, _) in matches)
-                    if (found.Add(name)) newCount++;
-
-                if (newCount > 0)
-                    LogMsg($"  详情内识别到 {newCount} 个新点赞人");
-
-                if (newCount == 0) emptyStreak++;
-                else emptyStreak = 0;
-
-                if (emptyStreak >= 2) break;
+                // 回退：点击右侧文字区
+                int txtX = Math.Min(item.Rect.Left + 520, item.Rect.Right - 40);
+                int txtY = item.Rect.Top + Math.Min(56, item.Rect.Height / 2);
+                if (!await TryEnterDetailAsync(wnd, root, txtX, txtY, config, ct))
+                {
+                    // 可能误触跳到了其他窗口（资料页等），按 Esc 收起浮层后再试一次图片区
+                    DismissOverlays(wnd);
+                    BringToFront(wnd);
+                    await Task.Delay(600, ct);
+                    if (!await TryEnterDetailAsync(wnd, root, imgX, imgY, config, ct))
+                    {
+                        LogMsg($"未能进入详情：{Truncate(item.Name, 24)}");
+                        return null;
+                    }
+                }
             }
+            await Task.Delay(800, ct);
 
-            // 在详情内向下滚动
-            GetClientRect(wnd, out RECT cr);
-            ImageAutomationHelper.ScrollClient(wnd, -WHEEL_DELTA * 4, cr.Right / 2, cr.Bottom / 2);
+            // 2) 详情内长文本 ListItem 即帖子本体：发布者 内容 包含N张图片 时间
+            string detailName = GetDetailPostName(root) ?? item.Name;
+            var post = ParseDetailName(detailName);
+            LogMsg($"进入详情：{Truncate(post.Publisher, 12)} | {Truncate(post.Content, 24)}");
+
+            // 3) 记录日期下方（点赞/评论区）的头像
+            int avatarCount = await RecordDetailAvatarsAsync(wnd, root, post, config, ct);
+
+            repo.UpsertMoment(post);
+
+            // 4) 点击左上角"返回"回到列表
+            await GoBackToListAsync(root, wnd, ct);
+            return avatarCount;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            LogMsg("扫描该条失败: " + ex.Message);
+            // 尽力回到列表，避免卡死在详情页
+            try { await GoBackToListAsync(root, wnd, ct); } catch { }
+            return null;
+        }
+    }
+
+    /// <summary>详情内帖子本体的 ListItem 名称最长（含发布者、内容、时间）。</summary>
+    private static string? GetDetailPostName(AutomationElement root)
+    {
+        string? best = null;
+        try
+        {
+            foreach (var el in root.FindAllDescendants())
+            {
+                try
+                {
+                    if (el.ControlType != FlaUI.Core.Definitions.ControlType.ListItem) continue;
+                    var name = el.Name?.Trim();
+                    if (string.IsNullOrEmpty(name)) continue;
+                    if (best == null || name.Length > best.Length) best = name;
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return best;
+    }
+
+    /// <summary>解析详情 ListItem 名称："发布者 内容 包含1张图片 2026年8月2日 18:27"。</summary>
+    private MomentPost ParseDetailName(string detailName)
+    {
+        var post = new MomentPost { ScanTime = DateTime.Now };
+        string s = detailName.Trim();
+
+        var tm = DetailTimeRegex.Match(s);
+        string? timeText = null;
+        if (tm.Success)
+        {
+            timeText = tm.Value;
+            s = s[..tm.Index];
+        }
+        s = MediaPhraseRegex.Replace(s, " ").Trim();
+
+        // 第一个空白前为发布者昵称，其余为正文
+        int sep = s.IndexOfAny(new[] { ' ', '\n', '\r', '\t' });
+        if (sep > 0)
+        {
+            post.Publisher = s[..sep].Trim();
+            post.Content = s[(sep + 1)..].Trim();
+        }
+        else
+        {
+            post.Content = s;
         }
 
-        // 按 Esc 返回列表
-        ImageAutomationHelper.PostKey(wnd, VK_ESCAPE);
-        await Task.Delay(600, ct);
-
-        return found.ToList();
+        if (timeText != null) post.PostTime = TryParseTime(timeText);
+        post.ContentHash = ComputeHash($"{post.Publisher}|{post.Content}|{timeText ?? ""}");
+        return post;
     }
 
-    /// <summary>用 CopyFromScreen 前台截取窗口区域。</summary>
-    private static (Mat mat, Rectangle bounds) CaptureWindowForeground(IntPtr hWnd)
+    /// <summary>
+    /// 在详情页截取帖子（日期行）下方的点赞/评论区，
+    /// 检测其中的方形头像并保存到 MomentsAvatars/&lt;指纹&gt;/ 目录。
+    /// </summary>
+    private async Task<int> RecordDetailAvatarsAsync(IntPtr wnd, AutomationElement root, MomentPost post, ScanConfig config, CancellationToken ct)
     {
-        GetWindowRect(hWnd, out RECT rc);
-        int x = rc.Left, y = rc.Top, w = rc.Right - rc.Left, h = rc.Bottom - rc.Top;
-        if (w <= 0 || h <= 0) w = 1; h = 1;
-        var rect = new Rectangle(x, y, w, h);
-        return (ImageAutomationHelper.CaptureRegion(rect), rect);
+        try
+        {
+            GetWindowRect(wnd, out RECT rc);
+            var wndRect = new Rectangle(rc.Left, rc.Top, rc.Right - rc.Left, rc.Bottom - rc.Top);
+
+            // 详情页有进入动画、点赞区渲染滞后：裁剪区太矮时等待重试，直到布局稳定
+            int roiY = 0, roiH = 0;
+            for (int attempt = 0; attempt < 4; attempt++)
+            {
+                // 帖子 ListItem 的底部即日期行下沿
+                int postBottom = -1;
+                int blockBottom = -1;
+                foreach (var el in root.FindAllDescendants())
+                {
+                    try
+                    {
+                        if (el.ControlType != FlaUI.Core.Definitions.ControlType.ListItem) continue;
+                        var r = el.BoundingRectangle;
+                        if (r.Width <= 0 || r.Height <= 0) continue;
+                        var name = el.Name?.Trim() ?? string.Empty;
+                        if (!string.IsNullOrEmpty(name))
+                            postBottom = Math.Max(postBottom, r.Bottom);
+                        else
+                            blockBottom = Math.Max(blockBottom, r.Bottom);
+                    }
+                    catch { }
+                }
+
+                if (postBottom <= 0) return 0;
+                if (blockBottom <= postBottom) blockBottom = wndRect.Bottom - 10;
+                roiY = postBottom + 4;
+                // 区域限高一屏，避免长文/大图把点赞区挤出视口时截到无关内容
+                int roiBottom = Math.Min(Math.Min(blockBottom, wndRect.Bottom - 10), roiY + 600);
+                roiH = roiBottom - roiY;
+                if (roiH >= 60) break;
+                await Task.Delay(700, ct);
+            }
+            if (roiH < 20) return 0;
+
+            var roi = new Rectangle(wndRect.X + 1, roiY, wndRect.Width - 2, roiH);
+            using var block = ImageAutomationHelper.CaptureRegion(roi);
+
+            string dir = Path.Combine(config.MomentsAvatarsDirectory, post.ContentHash);
+            Directory.CreateDirectory(dir);
+            string stamp = DateTime.Now.ToString("HHmmssfff");
+            ImageAutomationHelper.SaveDebug(block, Path.Combine(dir, $"detail_below_{stamp}.png"));
+
+            var avatars = ImageAutomationHelper.ExtractSquareAvatars(block);
+            for (int i = 0; i < avatars.Count; i++)
+            {
+                using var av = avatars[i];
+                ImageAutomationHelper.SaveDebug(av, Path.Combine(dir, $"avatar_{stamp}_{i:00}.png"));
+            }
+            if (avatars.Count > 0)
+                LogMsg($"  日期下方记录到 {avatars.Count} 个头像 → {dir}");
+            return avatars.Count;
+        }
+        catch (Exception ex)
+        {
+            LogMsg("记录详情头像失败: " + ex.Message);
+            return 0;
+        }
     }
+
+    /// <summary>
+    /// 点击并等待进入详情页。若点击后焦点跑到其他窗口（误触头像/图片），
+    /// 先把朋友圈窗口重新拉到前台再确认。
+    /// </summary>
+    private async Task<bool> TryEnterDetailAsync(
+        IntPtr wnd, AutomationElement root, int clickX, int clickY, ScanConfig config, CancellationToken ct)
+    {
+        BringToFront(wnd);
+        await Task.Delay(200, ct);
+        ImageAutomationHelper.ClickScreen(wnd, clickX, clickY);
+
+        int timeoutMs = config.DetailOpenWaitMs * 3;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        bool broughtBack = false;
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            ct.ThrowIfCancellationRequested();
+            await Task.Delay(300, ct);
+            if (IsDetailView(root)) return true;
+
+            // 点击把微信带到了别的窗口（如资料页）：拉回朋友圈窗口再观察
+            if (!broughtBack && GetForegroundWindow() != wnd)
+            {
+                BringToFront(wnd);
+                broughtBack = true;
+            }
+        }
+        return IsDetailView(root);
+    }
+
+    /// <summary>按 Esc 收起可能误开的资料弹层/浮层。</summary>
+    private static void DismissOverlays(IntPtr wnd)
+    {
+        ImageAutomationHelper.PostKey(wnd, VK_ESCAPE);
+        Thread.Sleep(400);
+        ImageAutomationHelper.PostKey(wnd, VK_ESCAPE);
+    }
+
+    /// <summary>点击朋友圈窗口左上角"返回"按钮回到列表页。
+    /// 最多点 3 次，应对 详情/个人主页 等多级页面堆叠；失败时按 Esc 兜底。</summary>
+    private async Task GoBackToListAsync(AutomationElement root, IntPtr wnd, CancellationToken ct)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            if (IsListView(root)) return;
+
+            var back = FindButtonCenterByName(root, "\u8fd4\u56de");
+            if (back.HasValue)
+            {
+                BringToFront(wnd);
+                ImageAutomationHelper.ClickScreen(wnd, back.Value.X, back.Value.Y);
+                if (await WaitViewAsync(root, detail: false, 3000, ct)) return;
+            }
+            ImageAutomationHelper.PostKey(wnd, VK_ESCAPE);
+            if (await WaitViewAsync(root, detail: false, 2000, ct)) return;
+        }
+    }
+
+    /// <summary>轮询等待视图切换完成：detail=true 等待详情页出现，否则等待列表页出现。</summary>
+    private static async Task<bool> WaitViewAsync(AutomationElement root, bool detail, int timeoutMs, CancellationToken ct)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            ct.ThrowIfCancellationRequested();
+            bool inDetail = IsDetailView(root);
+            bool inList = IsListView(root);
+            if (detail ? inDetail : inList) return true;
+            await Task.Delay(300, ct);
+        }
+        return detail ? IsDetailView(root) : IsListView(root);
+    }
+
+    private static string Truncate(string s, int max)
+        => string.IsNullOrEmpty(s) ? string.Empty : (s.Length <= max ? s : s[..max] + "…");
 
     // ====== 时间解析 ======
 
     private static DateTime? TryParseTime(string s)
     {
-        var m = Regex.Match(s, @"(\d+)\s*分钟前");
+        var m = Regex.Match(s, @"(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2}):(\d{2})");
+        if (m.Success)
+            return new DateTime(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value),
+                int.Parse(m.Groups[4].Value), int.Parse(m.Groups[5].Value), 0);
+        m = Regex.Match(s, @"(\d+)\s*分钟前");
         if (m.Success) return DateTime.Now.AddMinutes(-int.Parse(m.Groups[1].Value));
         m = Regex.Match(s, @"(\d+)\s*小时前");
         if (m.Success) return DateTime.Now.AddHours(-int.Parse(m.Groups[1].Value));
@@ -656,9 +1071,6 @@ public sealed class WeChatAutomationService
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct POINT { public int X, Y; }
-
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
     [DllImport("user32.dll")]
@@ -678,9 +1090,6 @@ public sealed class WeChatAutomationService
 
     [DllImport("user32.dll")]
     private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
-
-    [DllImport("user32.dll")]
-    private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
 
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
