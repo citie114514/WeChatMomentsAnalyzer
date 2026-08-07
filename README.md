@@ -111,6 +111,34 @@ WeChatMomentsAnalyzer/
 - 程序不会上传任何数据，全部存储在本地 SQLite。
 - 自动化操作微信属于非官方交互，使用风险自负。
 
+## 致谢
+
+本软件的设计与开发参考了以下优秀的开源项目，在此表示诚挚感谢：
+
+### 项目参考
+
+- [March7thAssistant](https://github.com/moesnow/March7thAssistant) — 提供了 **SendInput 真实硬件模拟 + 前台截图 + OpenCV 模板匹配** 的自动化方案参考，本软件中 `WeChatAutomationService` 与 `ImageAutomationHelper` 的实现思路受其启发。
+- [MaaAssistantArknights (MAA)](https://github.com/MaaAssistantArknights/MaaAssistantArknights) — 提供了**图像识别 + UI 自动化**的整体架构设计参考，本软件在自动化流程编排、状态机设计等方面借鉴了其成熟经验。
+
+### 开源依赖
+
+本软件离不开以下开源项目的支持，感谢所有维护者与贡献者：
+
+| 项目 | 用途 |
+|---|---|
+| [FlaUI](https://github.com/FlaUI/FlaUI) | Windows UI 自动化（UIA3） |
+| [OpenCvSharp](https://github.com/shimat/opencvsharp) | 图像处理与模板匹配 |
+| [CommunityToolkit.Mvvm](https://github.com/CommunityToolkit/dotnet) | MVVM 框架 |
+| [Microsoft.Data.Sqlite](https://github.com/dotnet/efcore) | 本地数据存储 |
+| [Dapper](https://github.com/DapperLib/Dapper) | 轻量级 ORM |
+
+## 声明
+
+- 本软件使用 [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.html) 协议开源，仅供学习和交流使用。
+- 本软件是免费、开源的项目，任何形式的商业化使用、二次销售或代练收费均与本软件无关。
+- 自动化操作微信 PC 客户端属于非官方行为，使用本软件产生的任何风险及后果由用户自行承担。
+- 本软件不会收集、上传或向第三方传输任何用户数据，所有数据均存储在本地。
+
 ## 许可
 
 GPL-3.0
