@@ -187,19 +187,22 @@ public sealed class WeChatAutomationService
 
         MinimizeOwnWindow();
         BringToFront(mainWnd);
-        await Task.Delay(1000, ct);
+        await Task.Delay(1200, ct);
 
+        // 用客户区左上角作为坐标基准，避免标题栏/边框带来的偏移
         GetWindowRect(mainWnd, out RECT mainRect);
         int winW = mainRect.Right - mainRect.Left;
         int winH = mainRect.Bottom - mainRect.Top;
+        var clientOrigin = new POINT { X = 0, Y = 0 };
+        ClientToScreen(mainWnd, ref clientOrigin);
 
         SaveDebugScreenshot(mainWnd, "main_win");
 
-        // 微信左侧栏图标参数（根据实际截图估算）
+        // 微信左侧栏图标参数（基于客户区左上角）
         int iconSpacing = 56; // 图标中心间距
-        int firstIconTopOffset = 50; // 第一个图标中心距窗口顶部的距离
-        int sidebarCenterX = mainRect.Left + 30; // 左侧栏中心
-        int momentsIconY = mainRect.Top + firstIconTopOffset + 3 * iconSpacing; // 第4个图标
+        int firstIconTopOffset = 18; // 第一个图标中心距客户区顶部的距离
+        int sidebarCenterX = clientOrigin.X + 30; // 左侧栏中心
+        int momentsIconY = clientOrigin.Y + firstIconTopOffset + 3 * iconSpacing; // 第4个图标
 
         // 兜底1：坐标点击左侧栏第4个图标
         LogMsg($"步骤1: 坐标点击左侧栏第4个图标 ({sidebarCenterX}, {momentsIconY})");
@@ -214,7 +217,7 @@ public sealed class WeChatAutomationService
         }
 
         // 兜底2：稍微上下调整 Y 坐标再试（兼容不同版本/缩放）
-        for (int dy = -20; dy <= 20; dy += 10)
+        for (int dy = -30; dy <= 30; dy += 15)
         {
             int tryY = momentsIconY + dy;
             LogMsg($"步骤1a: 尝试坐标 ({sidebarCenterX}, {tryY})");
@@ -230,7 +233,7 @@ public sealed class WeChatAutomationService
 
         // 步骤2：图像识别匹配左侧栏朋友圈图标
         int sidebarWidth = Math.Min(70, winW);
-        var sidebarRoi = new Rectangle(mainRect.Left, mainRect.Top, sidebarWidth, winH);
+        var sidebarRoi = new Rectangle(clientOrigin.X, clientOrigin.Y, sidebarWidth, winH);
         LogMsg($"步骤2: 图像识别匹配左侧栏朋友圈图标 (ROI: {sidebarRoi})");
         if (TryClickTemplate(mainWnd, config.MomentsIconTemplatePath, sidebarRoi, config.MatchThreshold, "左侧栏朋友圈图标"))
         {
@@ -630,14 +633,30 @@ public sealed class WeChatAutomationService
     private static void BringToFront(IntPtr hWnd)
     {
         ShowWindow(hWnd, SW_RESTORE);
+
+        // 通过 AttachThreadInput 绕过 Windows 前台窗口限制，强制激活目标窗口
+        IntPtr fgWnd = GetForegroundWindow();
+        uint fgThread = GetWindowThreadProcessId(fgWnd, out _);
+        uint curThread = GetCurrentThreadId();
+        if (fgThread != curThread)
+        {
+            AttachThreadInput(curThread, fgThread, true);
+        }
         SetForegroundWindow(hWnd);
         BringWindowToTop(hWnd);
+        if (fgThread != curThread)
+        {
+            AttachThreadInput(curThread, fgThread, false);
+        }
     }
 
     // ====== Win32 P/Invoke ======
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int X, Y; }
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -660,10 +679,22 @@ public sealed class WeChatAutomationService
     private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
 
     [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+    [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
 
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
