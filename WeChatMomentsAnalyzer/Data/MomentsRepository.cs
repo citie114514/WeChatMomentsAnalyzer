@@ -106,6 +106,10 @@ public sealed class MomentsRepository
                     new { p = post.Publisher, c = post.Content, pt = post.PostTime?.ToString("O"), st = post.ScanTime.ToString("O"), h = post.ContentHash }, tx);
             }
 
+            // 替换式更新点赞列表：先清空该朋友圈旧记录，避免历史污染/重复累积
+            conn.Execute("DELETE FROM likes WHERE moment_id = @mid;",
+                new { mid = momentId }, tx);
+
             foreach (var liker in post.Likers)
             {
                 conn.Execute("""

@@ -1135,25 +1135,21 @@ public sealed class WeChatAutomationService
                     foreach (var kv in contacts) kv.Value.Dispose();
                 }
 
-                // 路径2：OCR 文字行识别 —— 补充联系人库未覆盖的好友昵称
+                // 路径2：OCR 文字行仅落盘供诊断/调优，不再计入点赞人
+                // （评论者“XX：内容”与日期行等文本曾被误识为点赞人，造成 likes 表污染）
                 if (_ocr.IsAvailable)
                 {
-                    var lines = await _ocr.RecognizeAsync(block);
-                    foreach (var n in OcrService.ExtractNames(lines)) names.Add(n);
                     try
                     {
+                        var lines = await _ocr.RecognizeAsync(block);
                         File.WriteAllText(Path.Combine(dir, $"detail_ocr_{stamp}.txt"),
                             string.Join("\n", lines.Select(l => l.Text)));
                     }
                     catch { }
                 }
 
-                // 补充联系人库：仅在头像与昵称均唯一时存入（避免错误关联污染库）
-                if (avatars.Count == 1 && names.Count == 1)
-                    SaveAvatarToContacts(config, avatars[0].Image, names.First());
-
                 if (avatars.Count > 0 || names.Count > 0)
-                    LogMsg($"  日期下方 {avatars.Count} 头像，识别昵称 {names.Count} 个 → {dir}");
+                    LogMsg($"  日期下方 {avatars.Count} 头像，匹配点赞人 {names.Count} 个 → {dir}");
                 nameList = names.ToList();
             }
             finally
@@ -1167,19 +1163,6 @@ public sealed class WeChatAutomationService
             LogMsg("记录详情头像失败: " + ex.Message);
             return empty;
         }
-    }
-
-    /// <summary>把头像保存到联系人库（仅当该昵称尚无头像时），用于不断完备联系人库。</summary>
-    private static void SaveAvatarToContacts(ScanConfig config, Mat avatar, string name)
-    {
-        try
-        {
-            Directory.CreateDirectory(config.ContactAvatarsDirectory);
-            var path = Path.Combine(config.ContactAvatarsDirectory, SanitizeFileName(name) + ".png");
-            if (File.Exists(path)) return;
-            avatar.SaveImage(path);
-        }
-        catch { }
     }
 
     private static string SanitizeFileName(string name)
