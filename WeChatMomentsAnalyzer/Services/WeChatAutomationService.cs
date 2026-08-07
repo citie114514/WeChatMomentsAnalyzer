@@ -1054,8 +1054,10 @@ public sealed class WeChatAutomationService
 
     /// <summary>
     /// 在详情页截取帖子（日期行）下方的点赞/评论区，检测方形头像并保存，
-    /// 同时通过联系人头像库匹配 + OCR 文字行识别得到点赞/评论昵称列表。
-    /// 返回 (头像数, 昵称列表)；昵称列表用于填充 MomentPost.Likers 写入 likes 表。
+    /// 并通过联系人头像库模板匹配得到点赞人昵称列表。
+    /// 长文/九宫格帖子会把点赞区挤出视口：先下滚直到帖子主体底部进入视口下部，
+    /// 再向下分段截取合并（头像按像素相似去重、昵称取并集），确保点赞列表完整覆盖。
+    /// OCR 文字行仅落盘供诊断/调优，不计入点赞人。
     /// </summary>
     private async Task<(int avatarCount, List<string> names)> RecordDetailAvatarsAsync(
         IntPtr wnd, AutomationElement root, MomentPost post, ScanConfig config, CancellationToken ct)
@@ -1066,100 +1068,140 @@ public sealed class WeChatAutomationService
             GetWindowRect(wnd, out RECT rc);
             var wndRect = new Rectangle(rc.Left, rc.Top, rc.Right - rc.Left, rc.Bottom - rc.Top);
 
-            // 详情页有进入动画、点赞区渲染滞后：裁剪区太矮时等待重试，直到布局稳定
-            int roiY = 0, roiH = 0;
-            for (int attempt = 0; attempt < 4; attempt++)
+            // 详情页有进入动画、点赞区渲染滞后：等待 + 必要时下滚，直到帖子主体底部进入视口下部
+            int postBottom = -1, blockBottom = -1;
+            for (int attempt = 0; attempt < 6; attempt++)
             {
-                // 帖子 ListItem 的底部即日期行下沿
-                int postBottom = -1;
-                int blockBottom = -1;
-                foreach (var el in root.FindAllDescendants())
-                {
-                    try
-                    {
-                        if (el.ControlType != FlaUI.Core.Definitions.ControlType.ListItem) continue;
-                        var r = el.BoundingRectangle;
-                        if (r.Width <= 0 || r.Height <= 0) continue;
-                        var name = el.Name?.Trim() ?? string.Empty;
-                        if (!string.IsNullOrEmpty(name))
-                            postBottom = Math.Max(postBottom, r.Bottom);
-                        else
-                            blockBottom = Math.Max(blockBottom, r.Bottom);
-                    }
-                    catch { }
-                }
-
-                if (postBottom <= 0) return empty;
-                if (blockBottom <= postBottom) blockBottom = wndRect.Bottom - 10;
-                roiY = postBottom + 4;
-                // 区域限高一屏，避免长文/大图把点赞区挤出视口时截到无关内容
-                int roiBottom = Math.Min(Math.Min(blockBottom, wndRect.Bottom - 10), roiY + 600);
-                roiH = roiBottom - roiY;
-                if (roiH >= 60) break;
+                (postBottom, blockBottom) = MeasureDetailBlocks(root);
+                if (postBottom > 0 && postBottom <= wndRect.Bottom - 120) break;
+                if (postBottom > wndRect.Bottom - 120 && attempt >= 1)
+                    ImageAutomationHelper.ScrollClientBursts(wnd, -WHEEL_DELTA, 3, 120,
+                        (int)(wndRect.Width * 0.35), (int)(wndRect.Height * 0.7));
                 await Task.Delay(700, ct);
             }
-            if (roiH < 20) return empty;
-
-            var roi = new Rectangle(wndRect.X + 1, roiY, wndRect.Width - 2, roiH);
-            using var block = ImageAutomationHelper.CaptureRegion(roi);
+            if (postBottom <= 0) return empty;
 
             string dir = Path.Combine(config.MomentsAvatarsDirectory, post.ContentHash);
             Directory.CreateDirectory(dir);
             string stamp = DateTime.Now.ToString("HHmmssfff");
-            ImageAutomationHelper.SaveDebug(block, Path.Combine(dir, $"detail_below_{stamp}.png"));
 
-            var avatars = ImageAutomationHelper.ExtractSquareAvatarsWithBounds(block);
-            List<string> nameList;
+            var allNames = new HashSet<string>(StringComparer.Ordinal);
+            var allAvatars = new List<Mat>();
+            var contacts = ImageAutomationHelper.LoadContactTemplates(config.ContactAvatarsDirectory);
             try
             {
-                for (int i = 0; i < avatars.Count; i++)
-                    ImageAutomationHelper.SaveDebug(avatars[i].Image, Path.Combine(dir, $"avatar_{stamp}_{i:00}.png"));
-
-                var names = new HashSet<string>(StringComparer.Ordinal);
-
-                // 路径1：联系人头像库模板匹配 —— 在点赞区截图中查找出现在联系人库里的头像
-                var contacts = ImageAutomationHelper.LoadContactTemplates(config.ContactAvatarsDirectory);
-                try
+                // 向下分段截取：每段截完后若点赞/评论块尚未完整入视口，继续下滚补截
+                for (int seg = 0; seg < 3; seg++)
                 {
-                    if (contacts.Count > 0)
+                    (postBottom, blockBottom) = MeasureDetailBlocks(root);
+                    if (postBottom <= 0) break;
+                    if (blockBottom <= postBottom) blockBottom = wndRect.Bottom - 10;
+
+                    int roiTop = Math.Max(postBottom + 4, wndRect.Top + 72);
+                    int roiBottom = Math.Min(Math.Min(blockBottom, wndRect.Bottom - 10), roiTop + 600);
+                    if (roiBottom - roiTop >= 20)
                     {
-                        var matched = ImageAutomationHelper.MatchContacts(block, contacts, config.ContactMatchThreshold);
-                        foreach (var (nm, _) in matched) names.Add(nm);
-                    }
-                }
-                finally
-                {
-                    foreach (var kv in contacts) kv.Value.Dispose();
-                }
+                        using var block = ImageAutomationHelper.CaptureRegion(
+                            new Rectangle(wndRect.X + 1, roiTop, wndRect.Width - 2, roiBottom - roiTop));
+                        ImageAutomationHelper.SaveDebug(block, Path.Combine(dir, $"detail_below_{stamp}_{seg}.png"));
 
-                // 路径2：OCR 文字行仅落盘供诊断/调优，不再计入点赞人
-                // （评论者“XX：内容”与日期行等文本曾被误识为点赞人，造成 likes 表污染）
-                if (_ocr.IsAvailable)
-                {
-                    try
-                    {
-                        var lines = await _ocr.RecognizeAsync(block);
-                        File.WriteAllText(Path.Combine(dir, $"detail_ocr_{stamp}.txt"),
-                            string.Join("\n", lines.Select(l => l.Text)));
-                    }
-                    catch { }
-                }
+                        // 路径1：联系人头像库模板匹配 —— 在点赞区截图中查找出现在联系人库里的头像
+                        if (contacts.Count > 0)
+                        {
+                            var matched = ImageAutomationHelper.MatchContacts(block, contacts, config.ContactMatchThreshold);
+                            foreach (var (nm, _) in matched) allNames.Add(nm);
+                        }
 
-                if (avatars.Count > 0 || names.Count > 0)
-                    LogMsg($"  日期下方 {avatars.Count} 头像，匹配点赞人 {names.Count} 个 → {dir}");
-                nameList = names.ToList();
+                        // 路径2：OCR 文字行仅落盘供诊断/调优，不再计入点赞人
+                        if (_ocr.IsAvailable)
+                        {
+                            try
+                            {
+                                var lines = await _ocr.RecognizeAsync(block);
+                                File.WriteAllText(Path.Combine(dir, $"detail_ocr_{stamp}_{seg}.txt"),
+                                    string.Join("\n", lines.Select(l => l.Text)));
+                            }
+                            catch { }
+                        }
+
+                        // 合并本段头像，按像素相似去重（相邻分段区域可能重叠）
+                        var segAvatars = ImageAutomationHelper.ExtractSquareAvatarsWithBounds(block);
+                        try
+                        {
+                            foreach (var (img, _) in segAvatars)
+                            {
+                                if (!allAvatars.Any(ex => SameAvatar(ex, img)))
+                                    allAvatars.Add(img.Clone());
+                            }
+                        }
+                        finally
+                        {
+                            foreach (var (img, _) in segAvatars) img.Dispose();
+                        }
+                    }
+
+                    // 点赞/评论块已完整可见 → 截取完成
+                    if (blockBottom <= wndRect.Bottom - 10) break;
+
+                    ImageAutomationHelper.ScrollClientBursts(wnd, -WHEEL_DELTA, 3, 120,
+                        (int)(wndRect.Width * 0.35), (int)(wndRect.Height * 0.7));
+                    await Task.Delay(700, ct);
+                }
             }
             finally
             {
-                foreach (var (img, _) in avatars) img.Dispose();
+                foreach (var kv in contacts) kv.Value.Dispose();
             }
-            return (avatars.Count, nameList);
+
+            for (int i = 0; i < allAvatars.Count; i++)
+                ImageAutomationHelper.SaveDebug(allAvatars[i], Path.Combine(dir, $"avatar_{stamp}_{i:00}.png"));
+            if (allAvatars.Count > 0 || allNames.Count > 0)
+                LogMsg($"  日期下方 {allAvatars.Count} 头像，匹配点赞人 {allNames.Count} 个 → {dir}");
+            var nameList = allNames.ToList();
+            foreach (var m in allAvatars) m.Dispose();
+            return (allAvatars.Count, nameList);
         }
         catch (Exception ex)
         {
             LogMsg("记录详情头像失败: " + ex.Message);
             return empty;
         }
+    }
+
+    /// <summary>测量详情页：帖子主体 ListItem（带名称）底边 与 点赞/评论块（无名称）底边。</summary>
+    private static (int postBottom, int blockBottom) MeasureDetailBlocks(AutomationElement root)
+    {
+        int postBottom = -1, blockBottom = -1;
+        foreach (var el in root.FindAllDescendants())
+        {
+            try
+            {
+                if (el.ControlType != FlaUI.Core.Definitions.ControlType.ListItem) continue;
+                var r = el.BoundingRectangle;
+                if (r.Width <= 0 || r.Height <= 0) continue;
+                var name = el.Name?.Trim() ?? string.Empty;
+                if (!string.IsNullOrEmpty(name)) postBottom = Math.Max(postBottom, r.Bottom);
+                else blockBottom = Math.Max(blockBottom, r.Bottom);
+            }
+            catch { }
+        }
+        return (postBottom, blockBottom);
+    }
+
+    /// <summary>判断两个头像是否相同（缩放 16x16 比较平均绝对差），用于跨分段重叠区去重。</summary>
+    private static bool SameAvatar(Mat a, Mat b)
+    {
+        try
+        {
+            using var ra = new Mat();
+            using var rb = new Mat();
+            Cv2.Resize(a, ra, new OpenCvSharp.Size(16, 16));
+            Cv2.Resize(b, rb, new OpenCvSharp.Size(16, 16));
+            using var diff = new Mat();
+            Cv2.Absdiff(ra, rb, diff);
+            return Cv2.Mean(diff).Val0 < 18;
+        }
+        catch { return false; }
     }
 
     private static string SanitizeFileName(string name)
