@@ -262,6 +262,52 @@ public static class ImageAutomationHelper
         return matches;
     }
 
+    /// <summary>将单个头像与联系人库逐一匹配，返回最佳匹配的联系人名（超过阈值时）。
+    /// 仅在头像区域内匹配，配合窄尺度范围（0.85–1.15），避免缩放过小导致背景区伪匹配。</summary>
+    public static string? MatchSingleAvatar(Mat avatar, Dictionary<string, Mat> contacts, double threshold = 0.70)
+    {
+        if (contacts.Count == 0 || avatar.Empty()) return null;
+        string? bestName = null;
+        double bestScore = 0;
+        foreach (var kv in contacts)
+        {
+            double score = MatchTemplateScore(avatar, kv.Value, 0.85, 1.15);
+            if (score > bestScore) { bestScore = score; bestName = kv.Key; }
+        }
+        return bestScore >= threshold ? bestName : null;
+    }
+
+    /// <summary>在窄尺度范围内计算模板匹配最佳分数（避免 0.2 等极端缩放导致伪匹配）。</summary>
+    private static double MatchTemplateScore(Mat source, Mat template, double scaleMin, double scaleMax)
+    {
+        if (source.Empty() || template.Empty()) return 0;
+        double best = 0;
+        for (double scale = scaleMin; scale <= scaleMax; scale += 0.05)
+        {
+            int tw = (int)(template.Width * scale);
+            int th = (int)(template.Height * scale);
+            if (tw < 16 || th < 16) continue;
+            if (tw > source.Width || th > source.Height) continue;
+
+            Mat scaled = Math.Abs(scale - 1.0) < 0.01 ? template : new Mat();
+            try
+            {
+                if (scaled != template)
+                    Cv2.Resize(template, scaled, new OpenCvSharp.Size(tw, th));
+
+                using var result = new Mat(source.Rows - scaled.Rows + 1, source.Cols - scaled.Cols + 1, MatType.CV_32FC1);
+                Cv2.MatchTemplate(source, scaled, result, TemplateMatchModes.CCoeffNormed);
+                Cv2.MinMaxLoc(result, out _, out double maxVal, out _, out _);
+                if (maxVal > best) best = maxVal;
+            }
+            finally
+            {
+                if (scaled != template) scaled.Dispose();
+            }
+        }
+        return best;
+    }
+
     public static void SaveDebug(Mat mat, string path) { try { mat.SaveImage(path); } catch { } }
 
     /// <summary>

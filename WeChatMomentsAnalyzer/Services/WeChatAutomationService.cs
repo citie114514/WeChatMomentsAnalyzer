@@ -239,7 +239,7 @@ public sealed class WeChatAutomationService
             int emptyStreak = 0;
             int scrollLevel = 0;
 
-            for (int screen = 0; screen < 80; screen++)
+            for (int screen = 0; screen < 120; screen++)
             {
                 ct.ThrowIfCancellationRequested();
                 var items = GetContactItems(root, mainWnd.Value);
@@ -387,7 +387,7 @@ public sealed class WeChatAutomationService
                     if (el.ControlType != FlaUI.Core.Definitions.ControlType.ListItem) continue;
                     var r = el.BoundingRectangle;
                     if (r.Width <= 0 || r.Height <= 0) continue;
-                    if (r.Top < wndRect.Top + 60 || r.Top > wndRect.Bottom - 48) continue;
+                    if (r.Top < wndRect.Top + 40 || r.Top > wndRect.Bottom - 30) continue;
                     string name;
                     try { name = el.Name?.Trim() ?? string.Empty; } catch { continue; }
                     if (string.IsNullOrEmpty(name)) continue;
@@ -855,9 +855,10 @@ public sealed class WeChatAutomationService
                     // 窄元素是日期标签/徽章，不是条目；“置顶”条目跳过
                     if (r.Width < 200) continue;
                     if (name.StartsWith("置顶", StringComparison.Ordinal)) continue;
-                    // 必须以左侧日期开头（今天/昨天/M月D日…），排除签名等非朋友圈条目；
-                    // 不限名称长度，避免漏掉纯图短文案条目（如“今天”+相机占位图）
-                    if (!AlbumItemDatePrefixRegex.IsMatch(name)) continue;
+                    // 过滤签名/简介等非朋友圈条目（通常很短）；
+                    // 同日多条动态中非首条不含日期前缀但仍是有效条目，不能一刀切过滤
+                    if (name.Length < 2) continue;
+                    if (name == "朋友圈") continue;
                     if (!seen.Add(name)) continue; // UIA 偶尔重复暴露同一 ListItem
 
                     result.Add(new ListItemInfo(name, r));
@@ -1105,14 +1106,7 @@ public sealed class WeChatAutomationService
                             new Rectangle(wndRect.X + 1, roiTop, wndRect.Width - 2, roiBottom - roiTop));
                         ImageAutomationHelper.SaveDebug(block, Path.Combine(dir, $"detail_below_{stamp}_{seg}.png"));
 
-                        // 路径1：联系人头像库模板匹配 —— 在点赞区截图中查找出现在联系人库里的头像
-                        if (contacts.Count > 0)
-                        {
-                            var matched = ImageAutomationHelper.MatchContacts(block, contacts, config.ContactMatchThreshold);
-                            foreach (var (nm, _) in matched) allNames.Add(nm);
-                        }
-
-                        // 路径2：OCR 文字行仅落盘供诊断/调优，不再计入点赞人
+                        // OCR 文字行仅落盘供诊断/调优，不计入点赞人
                         if (_ocr.IsAvailable)
                         {
                             try
@@ -1124,12 +1118,18 @@ public sealed class WeChatAutomationService
                             catch { }
                         }
 
-                        // 合并本段头像，按像素相似去重（相邻分段区域可能重叠）
+                        // 提取本段头像：逐个与联系人库匹配得到点赞人昵称，并按像素相似去重（相邻分段可能重叠）
                         var segAvatars = ImageAutomationHelper.ExtractSquareAvatarsWithBounds(block);
                         try
                         {
                             foreach (var (img, _) in segAvatars)
                             {
+                                // 仅在头像位置与联系人库逐一匹配（窄尺度 0.85–1.15），避免对整块截图全局匹配导致背景区伪匹配
+                                if (contacts.Count > 0)
+                                {
+                                    var name = ImageAutomationHelper.MatchSingleAvatar(img, contacts, 0.70);
+                                    if (name != null) allNames.Add(name);
+                                }
                                 if (!allAvatars.Any(ex => SameAvatar(ex, img)))
                                     allAvatars.Add(img.Clone());
                             }
