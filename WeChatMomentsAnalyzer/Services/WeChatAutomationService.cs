@@ -226,6 +226,7 @@ public sealed class WeChatAutomationService
             int count = 0;
             string prevFp = string.Empty;
             int emptyStreak = 0;
+            int scrollLevel = 0;
 
             for (int screen = 0; screen < 80; screen++)
             {
@@ -236,9 +237,10 @@ public sealed class WeChatAutomationService
                 foreach (var item in items)
                 {
                     if (!seen.Add(item.Name)) continue;
-                    // 截取头像：ListItem 左侧约 40x40 区域（头像通常在条目左侧）
+                    // 截取头像：ListItem 左侧约 40x40 区域（头像通常在条目左侧）；底部截断条目夹紧避免截到窗口外
                     int ax = item.Rect.Left + 6;
                     int ay = item.Rect.Top + Math.Max(2, (item.Rect.Height - 40) / 2);
+                    ay = Math.Min(ay, wndRect.Bottom - 46);
                     var avRect = new Rectangle(ax, ay, 40, 40);
                     using var av = ImageAutomationHelper.CaptureRegion(avRect);
                     string path = Path.Combine(config.ContactAvatarsDirectory, SanitizeFileName(item.Name) + ".png");
@@ -250,20 +252,21 @@ public sealed class WeChatAutomationService
 
                 if (fp == prevFp)
                 {
-                    if (++emptyStreak >= 2) { LogMsg("通讯录已滚动到底，结束。"); break; }
+                    if (scrollLevel < 2)
+                    {
+                        scrollLevel++;
+                        LogMsg($"联系人滚动无效（内容未变），切换滚动策略 {scrollLevel + 1}");
+                    }
+                    else if (++emptyStreak >= 2) { LogMsg("通讯录已滚动到底，结束。"); break; }
                 }
-                else emptyStreak = 0;
+                else
+                {
+                    emptyStreak = 0;
+                    scrollLevel = 0;
+                }
                 prevFp = fp;
 
-                // 定向滚动联系人列表：滚轮取列表水平中心（主窗口中心常落在右侧详情面板，滚不动列表）。
-                // 半屏步长保证相邻两屏重叠，避免虚拟化列表跳页漏读联系人。
-                int sx = items.Count > 0
-                    ? (items.Min(i => i.Rect.Left) + items.Max(i => i.Rect.Right)) / 2
-                    : wndRect.Left + 220;
-                int sy = wndRect.Top + wndRect.Height / 2;
-                BringToFront(mainWnd.Value);
-                ImageAutomationHelper.ScrollScreen(mainWnd.Value, -WHEEL_DELTA * 3, sx, sy);
-                await Task.Delay(700, ct);
+                await ScrollContactsAsync(mainWnd.Value, root, wndRect, items, scrollLevel, ct);
             }
 
             LogMsg($"联系人扫描完成：共保存 {count} 个联系人头像 → {config.ContactAvatarsDirectory}");
@@ -273,6 +276,63 @@ public sealed class WeChatAutomationService
         {
             RestoreOwnWindow();
         }
+    }
+
+    /// <summary>
+    /// 定向滚动联系人列表。微信对单次大滚轮 delta 限幅、且光标悬停列表项时滚动可能失效，
+    /// 故用小步多次滚轮，无效时按策略升级：①列表水平中心 ②列表滚动条带 ③UIA ScrollPattern。
+    /// 滚完把鼠标移回标题栏，清除列表项悬停态。
+    /// </summary>
+    private async Task ScrollContactsAsync(IntPtr wnd, AutomationElement root, Rectangle wndRect,
+        List<ContactItemInfo> items, int level, CancellationToken ct)
+    {
+        int listLeft = items.Count > 0 ? items.Min(i => i.Rect.Left) : wndRect.Left + 90;
+        int listRight = items.Count > 0 ? items.Max(i => i.Rect.Right) : wndRect.Left + 450;
+        int sy = wndRect.Top + wndRect.Height / 2;
+
+        BringToFront(wnd);
+        if (level == 0)
+        {
+            ImageAutomationHelper.ScrollScreenBursts(wnd, -WHEEL_DELTA, 6, 120, (listLeft + listRight) / 2, sy);
+        }
+        else if (level == 1)
+        {
+            ImageAutomationHelper.ScrollScreenBursts(wnd, -WHEEL_DELTA, 6, 120, listRight - 8, sy);
+        }
+        else
+        {
+            var pt = new Point((listLeft + listRight) / 2, sy);
+            if (!TryScrollPattern(root, pt))
+                ImageAutomationHelper.ScrollScreenBursts(wnd, -WHEEL_DELTA, 10, 100, pt.X, pt.Y);
+        }
+        await Task.Delay(700, ct);
+
+        // 移开鼠标，避免悬停锚定阻碍下一次滚动
+        ImageAutomationHelper.MoveCursor(wndRect.Left + wndRect.Width / 2, wndRect.Top + 16);
+    }
+
+    /// <summary>尝试用 UIA ScrollPattern 滚动包含指定屏幕点的容器（不依赖鼠标滚轮，免疫悬停/光标问题）。</summary>
+    private static bool TryScrollPattern(AutomationElement root, Point screenPt)
+    {
+        try
+        {
+            foreach (var el in root.FindAllDescendants())
+            {
+                try
+                {
+                    var r = el.BoundingRectangle;
+                    if (r.Width <= 0 || r.Height <= 0) continue;
+                    if (screenPt.X < r.Left || screenPt.X > r.Right || screenPt.Y < r.Top || screenPt.Y > r.Bottom) continue;
+                    var sp = el.Patterns.Scroll.PatternOrDefault;
+                    if (sp == null) continue;
+                    sp.Scroll(FlaUI.Core.Definitions.ScrollAmount.NoAmount, FlaUI.Core.Definitions.ScrollAmount.LargeIncrement);
+                    return true;
+                }
+                catch { }
+            }
+        }
+        catch { }
+        return false;
     }
 
     /// <summary>打开通讯录页：优先 UIA 查找名为"通讯录"的入口并点击，兜底侧边栏固定坐标。</summary>
@@ -319,7 +379,7 @@ public sealed class WeChatAutomationService
                     if (el.ControlType != FlaUI.Core.Definitions.ControlType.ListItem) continue;
                     var r = el.BoundingRectangle;
                     if (r.Width <= 0 || r.Height <= 0) continue;
-                    if (r.Top < wndRect.Top + 60 || r.Bottom > wndRect.Bottom - 10) continue;
+                    if (r.Top < wndRect.Top + 60 || r.Top > wndRect.Bottom - 48) continue;
                     string name;
                     try { name = el.Name?.Trim() ?? string.Empty; } catch { continue; }
                     if (string.IsNullOrEmpty(name)) continue;

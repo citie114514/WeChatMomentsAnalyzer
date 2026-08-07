@@ -385,6 +385,35 @@ public static class ImageAutomationHelper
         SendMouseWheel(delta);
     }
 
+    /// <summary>屏幕坐标处连续多次小步滚轮（微信对单次大 delta 限幅，小步多次更可靠）。</summary>
+    public static void ScrollScreenBursts(IntPtr hWnd, int delta, int count, int intervalMs, int screenX, int screenY)
+    {
+        SetCursorPos(screenX, screenY);
+        System.Threading.Thread.Sleep(30);
+        for (int i = 0; i < count; i++)
+        {
+            SendMouseWheel(delta);
+            System.Threading.Thread.Sleep(intervalMs);
+        }
+    }
+
+    /// <summary>客户区坐标处连续多次小步滚轮。</summary>
+    public static void ScrollClientBursts(IntPtr hWnd, int delta, int count, int intervalMs, int clientX, int clientY)
+    {
+        var pt = new POINT { X = clientX, Y = clientY };
+        ClientToScreen(hWnd, ref pt);
+        SetCursorPos(pt.X, pt.Y);
+        System.Threading.Thread.Sleep(30);
+        for (int i = 0; i < count; i++)
+        {
+            SendMouseWheel(delta);
+            System.Threading.Thread.Sleep(intervalMs);
+        }
+    }
+
+    /// <summary>移动鼠标到指定屏幕坐标（移开悬停项，避免悬停锚定阻碍滚动）。</summary>
+    public static void MoveCursor(int screenX, int screenY) => SetCursorPos(screenX, screenY);
+
     /// <summary>在窗口中心位置滚轮滚动。</summary>
     public static void ScrollWindowCenter(IntPtr hWnd, int delta)
     {
