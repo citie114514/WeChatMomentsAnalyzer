@@ -41,7 +41,7 @@
                     </Grid>
 
                     <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,4,0,0">
-                        <Button Style="{StaticResource Md3FilledButtonStyle}"
+                        <Button Style="{ThemeResource AccentButtonStyle}"
                                 Command="{x:Bind ViewModel.StartScanCommand}"
                                 IsEnabled="{x:Bind ViewModel.IsScanning, Converter={StaticResource BoolNegationConverter}, Mode=OneWay}">
                             <StackPanel Orientation="Horizontal" Spacing="8">
@@ -49,7 +49,7 @@
                                 <TextBlock Text="开始扫描"/>
                             </StackPanel>
                         </Button>
-                        <Button Style="{StaticResource Md3OutlinedButtonStyle}"
+                        <Button
                                 Command="{x:Bind ViewModel.CancelScanCommand}"
                                 IsEnabled="{x:Bind ViewModel.IsScanning, Mode=OneWay}">
                             <TextBlock Text="取消"/>
@@ -65,7 +65,7 @@
                     <TextBlock TextWrapping="Wrap" Style="{ThemeResource Md3BodyMediumStyle}"
                                Text="扫描微信通讯录，读取好友昵称并截取头像建立头像库。扫描朋友圈时可按头像匹配识别点赞人昵称，显著提升按好友查询与排行榜的数据准确率。建议先扫描联系人再扫描朋友圈。"/>
                     <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,4,0,0">
-                        <Button Style="{StaticResource Md3OutlinedButtonStyle}"
+                        <Button
                                 Command="{x:Bind ViewModel.ScanContactsCommand}"
                                 IsEnabled="{x:Bind ViewModel.IsScanningContacts, Converter={StaticResource BoolNegationConverter}, Mode=OneWay}">
                             <StackPanel Orientation="Horizontal" Spacing="8">

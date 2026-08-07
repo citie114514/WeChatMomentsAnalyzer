@@ -223,7 +223,7 @@
     <Style x:Key="Md3FilledButtonStyle" TargetType="Button">
         <Setter Property="Background" Value="{ThemeResource Md3PrimaryBrush}"/>
         <Setter Property="Foreground" Value="{ThemeResource Md3OnPrimaryBrush}"/>
-        <Setter Property="CornerRadius" Value="{StaticResource Md3ShapeFullCornerRadius}"/>
+        <Setter Property="CornerRadius" Value="{StaticResource Md3ShapeSmallCornerRadius}"/>
         <Setter Property="MinHeight" Value="40"/>
         <Setter Property="Padding" Value="24,0"/>
         <Setter Property="FontWeight" Value="SemiBold"/>
@@ -234,7 +234,7 @@
         <Setter Property="Foreground" Value="{ThemeResource Md3PrimaryBrush}"/>
         <Setter Property="BorderBrush" Value="{ThemeResource Md3OutlineBrush}"/>
         <Setter Property="BorderThickness" Value="1"/>
-        <Setter Property="CornerRadius" Value="{StaticResource Md3ShapeFullCornerRadius}"/>
+        <Setter Property="CornerRadius" Value="{StaticResource Md3ShapeSmallCornerRadius}"/>
         <Setter Property="MinHeight" Value="40"/>
         <Setter Property="Padding" Value="24,0"/>
     </Style>
@@ -243,7 +243,7 @@
         <Setter Property="Background" Value="Transparent"/>
         <Setter Property="Foreground" Value="{ThemeResource Md3PrimaryBrush}"/>
         <Setter Property="BorderThickness" Value="0"/>
-        <Setter Property="CornerRadius" Value="{StaticResource Md3ShapeFullCornerRadius}"/>
+        <Setter Property="CornerRadius" Value="{StaticResource Md3ShapeSmallCornerRadius}"/>
         <Setter Property="MinHeight" Value="40"/>
         <Setter Property="Padding" Value="12,0"/>
     </Style>
