@@ -852,11 +852,11 @@ public sealed class WeChatAutomationService
                     string name;
                     try { name = el.Name?.Trim() ?? string.Empty; } catch { continue; }
                     if (string.IsNullOrEmpty(name)) continue;
-                    // 真正的条目名称含日期+内容摘要；过滤"置顶"等徽章小元素
-                    if (name.Length < 8) continue;
-                    // 跳过"置顶"条目
-                    if (name.StartsWith("\u7f6e\u9876", StringComparison.Ordinal)) continue;
-                    // 必须以左侧日期开头（今天/昨天/M月D日…），排除签名等非朋友圈条目
+                    // 窄元素是日期标签/徽章，不是条目；“置顶”条目跳过
+                    if (r.Width < 200) continue;
+                    if (name.StartsWith("置顶", StringComparison.Ordinal)) continue;
+                    // 必须以左侧日期开头（今天/昨天/M月D日…），排除签名等非朋友圈条目；
+                    // 不限名称长度，避免漏掉纯图短文案条目（如“今天”+相机占位图）
                     if (!AlbumItemDatePrefixRegex.IsMatch(name)) continue;
                     if (!seen.Add(name)) continue; // UIA 偶尔重复暴露同一 ListItem
 
@@ -1297,7 +1297,7 @@ public sealed class WeChatAutomationService
         int y = (int)(rc.Bottom * 0.72);
 
         if (level == 0)
-            ImageAutomationHelper.ScrollClientBursts(wnd, -WHEEL_DELTA, 6, 120, (int)(rc.Right * 0.35), y);
+            ImageAutomationHelper.ScrollClientBursts(wnd, -WHEEL_DELTA, 3, 120, (int)(rc.Right * 0.35), y);
         else if (level == 1)
             ImageAutomationHelper.ScrollClientBursts(wnd, -WHEEL_DELTA, 6, 120, (int)(rc.Right * 0.70), y);
         else
