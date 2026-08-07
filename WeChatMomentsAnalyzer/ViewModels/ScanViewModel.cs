@@ -24,6 +24,8 @@ public sealed partial class ScanViewModel : ObservableObject
     [ObservableProperty] private string _logText = string.Empty;
     [ObservableProperty] private int _momentCount;
     [ObservableProperty] private int _likeCount;
+    [ObservableProperty] private int _contactCount;
+    [ObservableProperty] private bool _isScanningContacts;
 
     public ScanViewModel(DispatcherQueue dispatcher)
     {
@@ -32,6 +34,15 @@ public sealed partial class ScanViewModel : ObservableObject
         var (m, l) = AppServices.Analysis.GetStats();
         MomentCount = m;
         LikeCount = l;
+        ContactCount = CountContactAvatars();
+    }
+
+    private static int CountContactAvatars()
+    {
+        var dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "WeChatMomentsAnalyzer", "Contacts");
+        return Directory.Exists(dir) ? Directory.EnumerateFiles(dir, "*.png").Count() : 0;
     }
 
     [RelayCommand]
@@ -91,6 +102,39 @@ public sealed partial class ScanViewModel : ObservableObject
     {
         _cts?.Cancel();
         StatusText = "正在取消…";
+    }
+
+    [RelayCommand]
+    private async Task ScanContactsAsync()
+    {
+        if (IsScanningContacts) return;
+        IsScanningContacts = true;
+        StatusText = "扫描联系人中…";
+        _cts = new CancellationTokenSource();
+
+        AppServices.Automation.Log -= OnLog;
+        AppServices.Automation.Log += OnLog;
+
+        try
+        {
+            var config = new ScanConfig { MyNickname = MyNickname.Trim() };
+            int n = await Task.Run(() => AppServices.Automation.ScanContactsAsync(config, _cts.Token), _cts.Token);
+            ContactCount = CountContactAvatars();
+            StatusText = $"联系人扫描完成：共 {n} 个";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "已取消";
+        }
+        catch (Exception ex)
+        {
+            StatusText = "联系人扫描失败：" + ex.Message;
+            AppendLog("[错误] " + ex);
+        }
+        finally
+        {
+            IsScanningContacts = false;
+        }
     }
 
     private void OnProgress(ScanProgress p)

@@ -77,6 +77,8 @@ public sealed class ScanConfig
         "WeChatMomentsAnalyzer", "MomentsAvatars");
     /// <summary>图像匹配相似度阈值（0~1）</summary>
     public double MatchThreshold { get; set; } = 0.55;
+    /// <summary>联系人头像匹配阈值（点赞区头像较小，略低于通用阈值以提升召回）</summary>
+    public double ContactMatchThreshold { get; set; } = 0.60;
     /// <summary>点入朋友圈详情后等待毫秒</summary>
     public int DetailOpenWaitMs { get; set; } = 1200;
     /// <summary>在详情页内最多滚动几次寻找点赞区</summary>

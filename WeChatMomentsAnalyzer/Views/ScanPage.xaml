@@ -58,6 +58,32 @@
                 </StackPanel>
             </Border>
 
+            <!-- 联系人头像库 -->
+            <Border Style="{StaticResource Md3FilledCardStyle}">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="联系人头像库" Style="{ThemeResource Md3TitleLargeStyle}"/>
+                    <TextBlock TextWrapping="Wrap" Style="{ThemeResource Md3BodyMediumStyle}"
+                               Text="扫描微信通讯录，读取好友昵称并截取头像建立头像库。扫描朋友圈时可按头像匹配识别点赞人昵称，显著提升按好友查询与排行榜的数据准确率。建议先扫描联系人再扫描朋友圈。"/>
+                    <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,4,0,0">
+                        <Button Style="{StaticResource Md3OutlinedButtonStyle}"
+                                Command="{x:Bind ViewModel.ScanContactsCommand}"
+                                IsEnabled="{x:Bind ViewModel.IsScanningContacts, Converter={StaticResource BoolNegationConverter}, Mode=OneWay}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE748;" FontFamily="Segoe MDL2 Assets" FontSize="14"/>
+                                <TextBlock Text="扫描联系人"/>
+                            </StackPanel>
+                        </Button>
+                        <Border Background="{ThemeResource Md3SecondaryContainerBrush}"
+                                CornerRadius="{StaticResource Md3ShapeMediumCornerRadius}" Padding="16,8">
+                            <StackPanel>
+                                <TextBlock Text="已保存联系人" Style="{ThemeResource Md3LabelMediumStyle}"/>
+                                <TextBlock Text="{x:Bind ViewModel.ContactCount, Mode=OneWay}" Style="{ThemeResource Md3HeadlineSmallStyle}"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
             <!-- 进度区 -->
             <Border Style="{StaticResource Md3FilledCardStyle}">
                 <StackPanel Spacing="12">

@@ -41,6 +41,9 @@ public sealed class WeChatAutomationService
     public event Action<ScanProgress>? ProgressChanged;
     public event Action<string>? Log;
 
+    // OCR 服务（Windows.Media.Ocr），识别详情页点赞/评论区昵称文本
+    private readonly OcrService _ocr = new();
+
     // 扫描日志同步落盘，便于离线诊断
     private static readonly string LogFilePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -182,6 +185,148 @@ public sealed class WeChatAutomationService
         {
             RestoreOwnWindow();
         }
+    }
+
+    // ====== 联系人爬取 ======
+
+    private record struct ContactItemInfo(string Name, Rectangle Rect);
+
+    // 通讯录中的系统/功能条目，不作为联系人保存
+    private static readonly string[] ContactSystemNames =
+        { "新的朋友", "群聊", "公众号", "标签", "企业微信联系人", "设备", "聊天信息", "小程序", "视频号" };
+
+    /// <summary>
+    /// 扫描微信通讯录，读取每个联系人昵称并截取头像，保存到 Contacts/&lt;昵称&gt;.png。
+    /// 建立联系人头像库后，扫描朋友圈详情时可按头像模板匹配识别点赞人昵称。
+    /// </summary>
+    public async Task<int> ScanContactsAsync(ScanConfig config, CancellationToken ct = default)
+    {
+        LogMsg("正在查找微信主窗口…");
+        var mainWnd = FindWeChatMainWindow();
+        if (mainWnd == null)
+            throw new InvalidOperationException("未找到微信主窗口，请先启动并登录微信 PC 客户端。");
+
+        MinimizeOwnWindow();
+        try
+        {
+            BringToFront(mainWnd.Value);
+            await Task.Delay(500, ct);
+
+            if (!await OpenContactsAsync(mainWnd.Value, ct))
+                throw new InvalidOperationException("未能自动打开通讯录，请手动切换到通讯录页后重试。");
+
+            Directory.CreateDirectory(config.ContactAvatarsDirectory);
+
+            using var automation = CreateAutomation();
+            var root = automation.FromHandle(mainWnd.Value);
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            int count = 0;
+            string prevFp = string.Empty;
+            int emptyStreak = 0;
+
+            for (int screen = 0; screen < 80; screen++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var items = GetContactItems(root, mainWnd.Value);
+                string fp = string.Join("|", items.Select(i => i.Name));
+
+                foreach (var item in items)
+                {
+                    if (!seen.Add(item.Name)) continue;
+                    // 截取头像：ListItem 左侧约 40x40 区域（头像通常在条目左侧）
+                    int ax = item.Rect.Left + 6;
+                    int ay = item.Rect.Top + Math.Max(2, (item.Rect.Height - 40) / 2);
+                    var avRect = new Rectangle(ax, ay, 40, 40);
+                    using var av = ImageAutomationHelper.CaptureRegion(avRect);
+                    string path = Path.Combine(config.ContactAvatarsDirectory, SanitizeFileName(item.Name) + ".png");
+                    ImageAutomationHelper.SaveDebug(av, path);
+                    count++;
+                }
+
+                LogMsg($"联系人第 {screen + 1} 屏：本屏 {items.Count} 项，累计 {count} 个");
+
+                if (fp == prevFp)
+                {
+                    if (++emptyStreak >= 2) { LogMsg("通讯录已滚动到底，结束。"); break; }
+                }
+                else emptyStreak = 0;
+                prevFp = fp;
+
+                await ScrollDownOneScreenAsync(mainWnd.Value, 700, ct);
+            }
+
+            LogMsg($"联系人扫描完成：共保存 {count} 个联系人头像 → {config.ContactAvatarsDirectory}");
+            return count;
+        }
+        finally
+        {
+            RestoreOwnWindow();
+        }
+    }
+
+    /// <summary>打开通讯录页：优先 UIA 查找名为"通讯录"的入口并点击，兜底侧边栏固定坐标。</summary>
+    private async Task<bool> OpenContactsAsync(IntPtr mainWnd, CancellationToken ct)
+    {
+        using var automation = CreateAutomation();
+        var root = automation.FromHandle(mainWnd);
+
+        foreach (var el in root.FindAllDescendants())
+        {
+            string name;
+            try { name = el.Name; } catch { continue; }
+            if (string.IsNullOrWhiteSpace(name) || !name.Contains("\u901a\u8baf\u5f55", StringComparison.Ordinal)) continue;
+            var r = el.BoundingRectangle;
+            if (r.Width <= 0 || r.Height <= 0) continue;
+            LogMsg($"点击通讯录入口 ({r.Left + r.Width / 2}, {r.Top + r.Height / 2})");
+            ImageAutomationHelper.ClickScreen(mainWnd, r.Left + r.Width / 2, r.Top + r.Height / 2);
+            await Task.Delay(1000, ct);
+            return true;
+        }
+
+        // 兜底：侧边栏固定坐标（通讯录入口在朋友圈上方，间距约 64）
+        var rect = await WaitForStableRectAsync(mainWnd, ct);
+        int cx = rect.Left + SidebarMomentsX;
+        int cy = rect.Top + SidebarMomentsY - 64;
+        LogMsg($"UIA 未找到通讯录入口，兜底点击侧边栏 ({cx}, {cy})");
+        ImageAutomationHelper.ClickScreen(mainWnd, cx, cy);
+        await Task.Delay(1000, ct);
+        return true;
+    }
+
+    private List<ContactItemInfo> GetContactItems(AutomationElement root, IntPtr wnd)
+    {
+        var result = new List<ContactItemInfo>();
+        try
+        {
+            GetWindowRect(wnd, out RECT rc);
+            var wndRect = new Rectangle(rc.Left, rc.Top, rc.Right - rc.Left, rc.Bottom - rc.Top);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var el in root.FindAllDescendants())
+            {
+                try
+                {
+                    if (el.ControlType != FlaUI.Core.Definitions.ControlType.ListItem) continue;
+                    var r = el.BoundingRectangle;
+                    if (r.Width <= 0 || r.Height <= 0) continue;
+                    if (r.Top < wndRect.Top + 60 || r.Bottom > wndRect.Bottom - 10) continue;
+                    string name;
+                    try { name = el.Name?.Trim() ?? string.Empty; } catch { continue; }
+                    if (string.IsNullOrEmpty(name)) continue;
+                    if (ContactSystemNames.Any(s => name.Contains(s, StringComparison.Ordinal))) continue;
+                    // 过滤字母索引标题（单个 ASCII 字母）
+                    if (name.Length == 1 && char.IsLetter(name[0]) && name[0] < 128) continue;
+                    if (!seen.Add(name)) continue;
+                    result.Add(new ContactItemInfo(name, r));
+                }
+                catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogMsg("读取联系人列表失败: " + ex.Message);
+        }
+        return result.OrderBy(i => i.Rect.Top).ToList();
     }
 
     // ====== 窗口查找 ======
@@ -752,8 +897,9 @@ public sealed class WeChatAutomationService
             var post = ParseDetailName(detailName);
             LogMsg($"进入详情：{Truncate(post.Publisher, 12)} | {Truncate(post.Content, 24)}");
 
-            // 3) 记录日期下方（点赞/评论区）的头像
-            int avatarCount = await RecordDetailAvatarsAsync(wnd, root, post, config, ct);
+            // 3) 记录日期下方（点赞/评论区）的头像与点赞/评论昵称
+            var (avatarCount, likerNames) = await RecordDetailAvatarsAsync(wnd, root, post, config, ct);
+            post.Likers = likerNames;
 
             repo.UpsertMoment(post);
 
@@ -826,11 +972,14 @@ public sealed class WeChatAutomationService
     }
 
     /// <summary>
-    /// 在详情页截取帖子（日期行）下方的点赞/评论区，
-    /// 检测其中的方形头像并保存到 MomentsAvatars/&lt;指纹&gt;/ 目录。
+    /// 在详情页截取帖子（日期行）下方的点赞/评论区，检测方形头像并保存，
+    /// 同时通过联系人头像库匹配 + OCR 文字行识别得到点赞/评论昵称列表。
+    /// 返回 (头像数, 昵称列表)；昵称列表用于填充 MomentPost.Likers 写入 likes 表。
     /// </summary>
-    private async Task<int> RecordDetailAvatarsAsync(IntPtr wnd, AutomationElement root, MomentPost post, ScanConfig config, CancellationToken ct)
+    private async Task<(int avatarCount, List<string> names)> RecordDetailAvatarsAsync(
+        IntPtr wnd, AutomationElement root, MomentPost post, ScanConfig config, CancellationToken ct)
     {
+        var empty = (0, new List<string>());
         try
         {
             GetWindowRect(wnd, out RECT rc);
@@ -859,7 +1008,7 @@ public sealed class WeChatAutomationService
                     catch { }
                 }
 
-                if (postBottom <= 0) return 0;
+                if (postBottom <= 0) return empty;
                 if (blockBottom <= postBottom) blockBottom = wndRect.Bottom - 10;
                 roiY = postBottom + 4;
                 // 区域限高一屏，避免长文/大图把点赞区挤出视口时截到无关内容
@@ -868,7 +1017,7 @@ public sealed class WeChatAutomationService
                 if (roiH >= 60) break;
                 await Task.Delay(700, ct);
             }
-            if (roiH < 20) return 0;
+            if (roiH < 20) return empty;
 
             var roi = new Rectangle(wndRect.X + 1, roiY, wndRect.Width - 2, roiH);
             using var block = ImageAutomationHelper.CaptureRegion(roi);
@@ -878,21 +1027,83 @@ public sealed class WeChatAutomationService
             string stamp = DateTime.Now.ToString("HHmmssfff");
             ImageAutomationHelper.SaveDebug(block, Path.Combine(dir, $"detail_below_{stamp}.png"));
 
-            var avatars = ImageAutomationHelper.ExtractSquareAvatars(block);
-            for (int i = 0; i < avatars.Count; i++)
+            var avatars = ImageAutomationHelper.ExtractSquareAvatarsWithBounds(block);
+            List<string> nameList;
+            try
             {
-                using var av = avatars[i];
-                ImageAutomationHelper.SaveDebug(av, Path.Combine(dir, $"avatar_{stamp}_{i:00}.png"));
+                for (int i = 0; i < avatars.Count; i++)
+                    ImageAutomationHelper.SaveDebug(avatars[i].Image, Path.Combine(dir, $"avatar_{stamp}_{i:00}.png"));
+
+                var names = new HashSet<string>(StringComparer.Ordinal);
+
+                // 路径1：联系人头像库模板匹配 —— 在点赞区截图中查找出现在联系人库里的头像
+                var contacts = ImageAutomationHelper.LoadContactTemplates(config.ContactAvatarsDirectory);
+                try
+                {
+                    if (contacts.Count > 0)
+                    {
+                        var matched = ImageAutomationHelper.MatchContacts(block, contacts, config.ContactMatchThreshold);
+                        foreach (var (nm, _) in matched) names.Add(nm);
+                    }
+                }
+                finally
+                {
+                    foreach (var kv in contacts) kv.Value.Dispose();
+                }
+
+                // 路径2：OCR 文字行识别 —— 补充联系人库未覆盖的好友昵称
+                if (_ocr.IsAvailable)
+                {
+                    var lines = await _ocr.RecognizeAsync(block);
+                    foreach (var n in OcrService.ExtractNames(lines)) names.Add(n);
+                    try
+                    {
+                        File.WriteAllText(Path.Combine(dir, $"detail_ocr_{stamp}.txt"),
+                            string.Join("\n", lines.Select(l => l.Text)));
+                    }
+                    catch { }
+                }
+
+                // 补充联系人库：仅在头像与昵称均唯一时存入（避免错误关联污染库）
+                if (avatars.Count == 1 && names.Count == 1)
+                    SaveAvatarToContacts(config, avatars[0].Image, names.First());
+
+                if (avatars.Count > 0 || names.Count > 0)
+                    LogMsg($"  日期下方 {avatars.Count} 头像，识别昵称 {names.Count} 个 → {dir}");
+                nameList = names.ToList();
             }
-            if (avatars.Count > 0)
-                LogMsg($"  日期下方记录到 {avatars.Count} 个头像 → {dir}");
-            return avatars.Count;
+            finally
+            {
+                foreach (var (img, _) in avatars) img.Dispose();
+            }
+            return (avatars.Count, nameList);
         }
         catch (Exception ex)
         {
             LogMsg("记录详情头像失败: " + ex.Message);
-            return 0;
+            return empty;
         }
+    }
+
+    /// <summary>把头像保存到联系人库（仅当该昵称尚无头像时），用于不断完备联系人库。</summary>
+    private static void SaveAvatarToContacts(ScanConfig config, Mat avatar, string name)
+    {
+        try
+        {
+            Directory.CreateDirectory(config.ContactAvatarsDirectory);
+            var path = Path.Combine(config.ContactAvatarsDirectory, SanitizeFileName(name) + ".png");
+            if (File.Exists(path)) return;
+            avatar.SaveImage(path);
+        }
+        catch { }
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new StringBuilder(name.Length);
+        foreach (var ch in name) sb.Append(invalid.Contains(ch) ? '_' : ch);
+        return sb.ToString().Trim();
     }
 
     /// <summary>

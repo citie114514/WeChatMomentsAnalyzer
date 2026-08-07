@@ -270,8 +270,15 @@ public static class ImageAutomationHelper
     /// 过滤出尺寸/宽高比接近正方形的块即为头像。
     /// </summary>
     public static List<Mat> ExtractSquareAvatars(Mat block, int minSize = 30, int maxSize = 96)
+        => ExtractSquareAvatarsWithBounds(block, minSize, maxSize).Select(x => x.Image).ToList();
+
+    /// <summary>
+    /// 提取近方形头像块，同时返回每个头像的边界（相对 block 左上角）。
+    /// 边界用于与 OCR 文字行做位置关联、以及限定联系人匹配的搜索区域。
+    /// </summary>
+    public static List<(Mat Image, Rect Bounds)> ExtractSquareAvatarsWithBounds(Mat block, int minSize = 30, int maxSize = 96)
     {
-        var avatars = new List<Mat>();
+        var avatars = new List<(Mat, Rect)>();
         if (block.Empty() || block.Width < minSize || block.Height < minSize) return avatars;
 
         try
@@ -336,7 +343,7 @@ public static class ImageAutomationHelper
                     Math.Min(block.Width - Math.Max(0, b.X - 2), b.Width + 4),
                     Math.Min(block.Height - Math.Max(0, b.Y - 2), b.Height + 4));
                 if (r.Width < minSize || r.Height < minSize) continue;
-                avatars.Add(new Mat(block, r).Clone());
+                avatars.Add((new Mat(block, r).Clone(), r));
             }
         }
         catch { }
