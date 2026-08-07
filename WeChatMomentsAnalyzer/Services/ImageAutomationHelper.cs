@@ -377,6 +377,14 @@ public static class ImageAutomationHelper
         SendMouseWheel(delta);
     }
 
+    /// <summary>在屏幕坐标处执行真实鼠标滚轮滚动（用于定向滚动指定列表区域）。</summary>
+    public static void ScrollScreen(IntPtr hWnd, int delta, int screenX, int screenY)
+    {
+        SetCursorPos(screenX, screenY);
+        System.Threading.Thread.Sleep(30);
+        SendMouseWheel(delta);
+    }
+
     /// <summary>在窗口中心位置滚轮滚动。</summary>
     public static void ScrollWindowCenter(IntPtr hWnd, int delta)
     {

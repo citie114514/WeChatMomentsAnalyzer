@@ -219,6 +219,8 @@ public sealed class WeChatAutomationService
 
             using var automation = CreateAutomation();
             var root = automation.FromHandle(mainWnd.Value);
+            GetWindowRect(mainWnd.Value, out RECT wrc);
+            var wndRect = new Rectangle(wrc.Left, wrc.Top, wrc.Right - wrc.Left, wrc.Bottom - wrc.Top);
 
             var seen = new HashSet<string>(StringComparer.Ordinal);
             int count = 0;
@@ -253,7 +255,15 @@ public sealed class WeChatAutomationService
                 else emptyStreak = 0;
                 prevFp = fp;
 
-                await ScrollDownOneScreenAsync(mainWnd.Value, 700, ct);
+                // 定向滚动联系人列表：滚轮取列表水平中心（主窗口中心常落在右侧详情面板，滚不动列表）。
+                // 半屏步长保证相邻两屏重叠，避免虚拟化列表跳页漏读联系人。
+                int sx = items.Count > 0
+                    ? (items.Min(i => i.Rect.Left) + items.Max(i => i.Rect.Right)) / 2
+                    : wndRect.Left + 220;
+                int sy = wndRect.Top + wndRect.Height / 2;
+                BringToFront(mainWnd.Value);
+                ImageAutomationHelper.ScrollScreen(mainWnd.Value, -WHEEL_DELTA * 3, sx, sy);
+                await Task.Delay(700, ct);
             }
 
             LogMsg($"联系人扫描完成：共保存 {count} 个联系人头像 → {config.ContactAvatarsDirectory}");
