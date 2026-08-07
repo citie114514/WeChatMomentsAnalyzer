@@ -92,10 +92,11 @@ public sealed class WeChatAutomationService
                 LogMsg("相册滚回顶部…");
                 BringToFront(targetWnd);
                 GetClientRect(targetWnd, out RECT topRc);
-                // 单次大滚轮会被微信限幅，分多次小步滚到顶
+                // 单次大滚轮会被微信限幅，分多次小步滚到顶；落点取内容列（避开置顶区与空白间隔等非滚动区）
                 for (int i = 0; i < 10; i++)
                 {
-                    ImageAutomationHelper.ScrollClient(targetWnd, WHEEL_DELTA * 6, topRc.Right / 2, topRc.Bottom / 2);
+                    ImageAutomationHelper.ScrollClientBursts(targetWnd, WHEEL_DELTA * 2, 3, 100,
+                        (int)(topRc.Right * 0.35), (int)(topRc.Bottom * 0.72));
                     await Task.Delay(200, ct);
                 }
                 await Task.Delay(800, ct);
@@ -106,6 +107,7 @@ public sealed class WeChatAutomationService
             int totalMoments = 0;
             int totalAvatars = 0;
             int emptyStreak = 0;
+            int scrollLevel = 0;
             string prevScreenFingerprint = string.Empty;
 
             while (totalScreens < config.MaxScrollScreens)
@@ -171,12 +173,21 @@ public sealed class WeChatAutomationService
 
                 if (fingerprint == prevScreenFingerprint && totalScreens > 1)
                 {
-                    LogMsg("滚动后内容未变化，已到达底部，结束扫描。");
-                    break;
+                    if (scrollLevel < 2)
+                    {
+                        scrollLevel++;
+                        LogMsg($"相册滚动无效（内容未变），切换滚动策略 {scrollLevel + 1}");
+                    }
+                    else
+                    {
+                        LogMsg("滚动后内容未变化，已到达底部，结束扫描。");
+                        break;
+                    }
                 }
+                else scrollLevel = 0;
                 prevScreenFingerprint = fingerprint;
 
-                await ScrollDownOneScreenAsync(targetWnd, config.ScrollWaitMs, ct);
+                await ScrollAlbumAsync(targetWnd, momentsEl, scrollLevel, config.ScrollWaitMs, ct);
             }
 
             LogMsg($"扫描完成：共 {totalScreens} 屏，{totalMoments} 条朋友圈入库，记录头像 {totalAvatars} 个。");
@@ -838,8 +849,8 @@ public sealed class WeChatAutomationService
                     var r = el.BoundingRectangle;
                     if (r.Width <= 0 || r.Height <= 0) continue;
 
-                    // 只保留完整落在窗口内的条目（工具栏高约 72px）
-                    if (r.Top < wndRect.Top + 72 || r.Bottom > wndRect.Bottom - 10) continue;
+                    // 只保留顶部完整可见的条目（工具栏高约 72px）；底部允许部分截断（点击坐标会夹紧到窗口内）
+                    if (r.Top < wndRect.Top + 72 || r.Top > wndRect.Bottom - 80) continue;
 
                     string name;
                     try { name = el.Name?.Trim() ?? string.Empty; } catch { continue; }
@@ -942,6 +953,9 @@ public sealed class WeChatAutomationService
             //    优先点击图片区进入详情；无图条目该位置落在文字上同样可进入。
             int imgX = item.Rect.Left + 245;
             int imgY = item.Rect.Top + Math.Max(60, item.Rect.Height / 2);
+            // 底部截断条目：点击坐标夹紧到窗口内，避免点到窗口外
+            GetWindowRect(wnd, out RECT irc);
+            imgY = Math.Min(imgY, irc.Bottom - 24);
             if (!await TryEnterDetailAsync(wnd, root, imgX, imgY, config, ct))
             {
                 // 回退：点击右侧文字区
@@ -1292,15 +1306,31 @@ public sealed class WeChatAutomationService
 
     // ====== 滚动 ======
 
-    private static async Task<bool> ScrollDownOneScreenAsync(IntPtr wnd, int waitMs, CancellationToken ct)
+    /// <summary>
+    /// 相册页下滚。窗口中心常落在置顶区与内容之间等不可滚动空白区，故落点取内容列；
+    /// 无效时按策略升级：①左内容列 ②右内容列 ③UIA ScrollPattern。滚完把鼠标移回标题栏清除悬停态。
+    /// </summary>
+    private async Task ScrollAlbumAsync(IntPtr wnd, AutomationElement root, int level, int waitMs, CancellationToken ct)
     {
         BringToFront(wnd);
         GetClientRect(wnd, out RECT rc);
-        int cx = rc.Right / 2;
-        int cy = rc.Bottom / 2;
-        ImageAutomationHelper.ScrollClient(wnd, -WHEEL_DELTA * 5, cx, cy);
+        int y = (int)(rc.Bottom * 0.72);
+
+        if (level == 0)
+            ImageAutomationHelper.ScrollClientBursts(wnd, -WHEEL_DELTA, 6, 120, (int)(rc.Right * 0.35), y);
+        else if (level == 1)
+            ImageAutomationHelper.ScrollClientBursts(wnd, -WHEEL_DELTA, 6, 120, (int)(rc.Right * 0.70), y);
+        else
+        {
+            GetWindowRect(wnd, out RECT wr);
+            var pt = new Point(wr.Left + rc.Right / 2, wr.Top + (int)(rc.Bottom * 0.6));
+            if (!TryScrollPattern(root, pt))
+                ImageAutomationHelper.ScrollClientBursts(wnd, -WHEEL_DELTA, 10, 100, rc.Right / 2, y);
+        }
         await Task.Delay(waitMs, ct);
-        return true;
+
+        GetWindowRect(wnd, out RECT wrc);
+        ImageAutomationHelper.MoveCursor(wrc.Left + (wrc.Right - wrc.Left) / 2, wrc.Top + 12);
     }
 
     // ====== 窗口管理 ======
