@@ -31,6 +31,9 @@ if (-not $msbuild) {
     Write-Error "MSBuild not found. Install Visual Studio Build Tools 2022 or add MSBuild.exe to PATH."
 }
 
+# 先结束正在运行的实例，避免 exe 被锁导致 build/publish 复制失败（-Run 中断的常见原因）
+Stop-Process -Name WeChatMomentsAnalyzer -Force -ErrorAction SilentlyContinue
+
 Write-Host "`nRestore and build..." -ForegroundColor Cyan
 & $msbuild $proj /p:Configuration=$Config /p:Platform=$Arch /restore
 if ($LASTEXITCODE -ne 0) { Write-Error "Build failed" }
@@ -43,12 +46,13 @@ if ($LASTEXITCODE -ne 0) { Write-Warning "Publish failed; will fall back to buil
 
 if ($Run) {
     $base = Join-Path $root "WeChatMomentsAnalyzer\bin\$Arch\$Config\net8.0-windows10.0.19041.0\win-x64"
-    $exe = Join-Path $base 'publish\WeChatMomentsAnalyzer.exe'
-    if (-not (Test-Path $exe)) { $exe = Join-Path $base 'WeChatMomentsAnalyzer.exe' }
+    # 优先启动刚构建的最新产物；publish 目录可能残留旧版本 exe，仅作兑底
+    $exe = Join-Path $base 'WeChatMomentsAnalyzer.exe'
+    if (-not (Test-Path $exe)) { $exe = Join-Path $base 'publish\WeChatMomentsAnalyzer.exe' }
     if (-not (Test-Path $exe)) {
         Write-Error "Executable not found under: $base"
     }
     Write-Host "`nStart: $exe" -ForegroundColor Green
     # Start-Process 异步启动，脚本立即返回，不阻塞终端
-    Start-Process -FilePath $exe
+    Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe -Parent)
 }
