@@ -83,7 +83,12 @@ public sealed class WeChatAutomationService
         var targetWnd = momentsWnd.Value;
         using var automation = CreateAutomation();
         var momentsEl = automation.FromHandle(targetWnd);
-
+        
+        // 全量重建：旧版本曾把评论/OCR 文本/位置文本计入点赞，历史库中的污染数据
+        // 无法靠按条替换式更新自愈，故每次扫描开始先清空，由当前干净逻辑完整重建
+        repo.ClearAll();
+        LogMsg("已清空旧的朋友圈/点赞数据，本次扫描将完整重建。");
+        
         try
         {
             // 相册页可能停留在上次会话的中间/底部：先滚回顶部再开始扫描
@@ -820,6 +825,9 @@ public sealed class WeChatAutomationService
     // 个人相册页（扫描目标页）条目以左侧日期开头："8月04 04 内容…"/"今天 …"/"昨天 …"；
     // "置顶"与个性签名等条目不以日期开头，用此前缀正则排除
     private static readonly Regex AlbumItemDatePrefixRegex = new(@"^(\d{1,2}月\d{1,2}|\d{4}年\d{1,2}月\d{1,2}|\d+\s*(分钟|小时|天)前|昨天|今天)");
+    // 地理位置文本（如"福州市·长乐下沙沙滩"）：纯图片朋友圈会把位置显示为文本，
+    // 不能把它当作动态正文或独立条目
+    private static readonly Regex LocationOnlyRegex = new(@"^[\p{IsHan}A-Za-z0-9_\-]{1,12}·[\p{IsHan}A-Za-z0-9_\-·]{1,24}$");
 
     /// <summary>读取朋友圈列表页中完整可见的 ListItem（每条朋友圈一个，名称含日期和内容摘要）。</summary>
     private List<ListItemInfo> GetListPageItems(AutomationElement root, IntPtr wnd)
@@ -876,6 +884,8 @@ public sealed class WeChatAutomationService
             }
             else if (seenDate)
             {
+                // 位置信息元素（无日期前缀、形如"城市·地点"）不是动态条目，跳过避免误记为一条动态
+                if (LocationOnlyRegex.IsMatch(item.Name)) continue;
                 result.Add(item);
             }
         }
@@ -1057,6 +1067,9 @@ public sealed class WeChatAutomationService
             post.Content = s;
         }
 
+        // 纯图片朋友圈的正文位置会显示地理位置文本，不能记为动态内容
+        if (LocationOnlyRegex.IsMatch(post.Content)) post.Content = "[图片]";
+
         if (timeText != null) post.PostTime = TryParseTime(timeText);
         post.ContentHash = ComputeHash($"{post.Publisher}|{post.Content}|{timeText ?? ""}");
         return post;
@@ -1067,7 +1080,7 @@ public sealed class WeChatAutomationService
     /// 并通过联系人头像库模板匹配得到点赞人昵称列表。
     /// 长文/九宫格帖子会把点赞区挤出视口：先下滚直到帖子主体底部进入视口下部，
     /// 再向下分段截取合并（头像按像素相似去重、昵称取并集），确保点赞列表完整覆盖。
-    /// OCR 文字行仅落盘供诊断/调优，不计入点赞人。
+    /// OCR 文字行落盘供诊断，并用于排除评论者头像（不直接计入点赞人）。
     /// </summary>
     private async Task<(int avatarCount, List<string> names)> RecordDetailAvatarsAsync(
         IntPtr wnd, AutomationElement root, MomentPost post, ScanConfig config, CancellationToken ct)
@@ -1115,14 +1128,15 @@ public sealed class WeChatAutomationService
                             new Rectangle(wndRect.X + 1, roiTop, wndRect.Width - 2, roiBottom - roiTop));
                         ImageAutomationHelper.SaveDebug(block, Path.Combine(dir, $"detail_below_{stamp}_{seg}.png"));
 
-                        // OCR 文字行仅落盘供诊断/调优，不计入点赞人
+                        // OCR 文字行落盘供诊断，同时用于识别评论者头像（见 IsCommentAvatar）
+                        var ocrLines = new List<OcrLine>();
                         if (_ocr.IsAvailable)
                         {
                             try
                             {
-                                var lines = await _ocr.RecognizeAsync(block);
+                                ocrLines = await _ocr.RecognizeAsync(block);
                                 File.WriteAllText(Path.Combine(dir, $"detail_ocr_{stamp}_{seg}.txt"),
-                                    string.Join("\n", lines.Select(l => l.Text)));
+                                    string.Join("\n", ocrLines.Select(l => l.Text)));
                             }
                             catch { }
                         }
@@ -1131,10 +1145,11 @@ public sealed class WeChatAutomationService
                         var segAvatars = ImageAutomationHelper.ExtractSquareAvatarsWithBounds(block);
                         try
                         {
-                            foreach (var (img, _) in segAvatars)
+                            foreach (var (img, bounds) in segAvatars)
                             {
-                                // 仅在头像位置与联系人库逐一匹配（窄尺度 0.85–1.15），避免对整块截图全局匹配导致背景区伪匹配
-                                if (contacts.Count > 0)
+                                // 评论行（"昵称：内容"）左侧的头像是评论者而非点赞人，跳过匹配；
+                                // 其余头像仅在头像位置与联系人库逐一匹配（窄尺度 0.85–1.15），避免背景区伪匹配
+                                if (!IsCommentAvatar(bounds, ocrLines) && contacts.Count > 0)
                                 {
                                     var name = ImageAutomationHelper.MatchSingleAvatar(img, contacts, 0.70);
                                     if (name != null) allNames.Add(name);
@@ -1195,6 +1210,29 @@ public sealed class WeChatAutomationService
             catch { }
         }
         return (postBottom, blockBottom);
+    }
+
+    /// <summary>
+    /// 判断头像是否属于评论者：OCR 评论行形如"昵称：内容"，文字位于头像右侧且垂直方向重叠；
+    /// 点赞区头像右侧同一水平带没有带冒号的文字行。用于避免把评论人计入点赞人
+    /// （历史上"表哥：新年快乐"中的"表哥"曾被误计为点赞人）。
+    /// </summary>
+    private static bool IsCommentAvatar(Rect avatar, List<OcrLine> lines)
+    {
+        foreach (var l in lines)
+        {
+            var t = l.Text;
+            if (string.IsNullOrEmpty(t)) continue;
+            if (!t.Contains('：') && !t.Contains(':')) continue;
+            var lr = l.Bounds;
+            if (lr.Width <= 0 || lr.Height <= 0) continue;
+            int avCy = avatar.Y + avatar.Height / 2;
+            int lCy = lr.Y + lr.Height / 2;
+            if (Math.Abs(avCy - lCy) > Math.Max(avatar.Height, lr.Height)) continue;
+            // 评论文字起点紧跟头像右缘
+            if (lr.X >= avatar.X + avatar.Width - 8 && lr.X <= avatar.X + avatar.Width + 320) return true;
+        }
+        return false;
     }
 
     /// <summary>判断两个头像是否相同（缩放 16x16 比较平均绝对差），用于跨分段重叠区去重。</summary>

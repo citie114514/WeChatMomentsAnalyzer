@@ -73,6 +73,27 @@ public sealed class MomentsRepository
     }
 
     /// <summary>
+    /// 清空朋友圈与点赞数据（扫描开始时调用）：历史版本曾写入评论/OCR/位置等污染数据，
+    /// 按条替换式更新无法清除未被重新扫到的脏行，故每次扫描全量重建。
+    /// </summary>
+    public void ClearAll()
+    {
+        using var conn = OpenConnection();
+        using var tx = conn.BeginTransaction();
+        try
+        {
+            conn.Execute("DELETE FROM likes;", transaction: tx);
+            conn.Execute("DELETE FROM moments;", transaction: tx);
+            tx.Commit();
+        }
+        catch
+        {
+            tx.Rollback();
+            throw;
+        }
+    }
+
+    /// <summary>
     /// 插入或更新一条朋友圈与其点赞列表（按 content_hash 去重）
     /// </summary>
     public void UpsertMoment(MomentPost post)
