@@ -236,8 +236,7 @@ public sealed class WeChatAutomationService
             var seen = new HashSet<string>(StringComparer.Ordinal);
             int count = 0;
             string prevFp = string.Empty;
-            int emptyStreak = 0;
-            int scrollLevel = 0;
+            int stall = 0;
 
             for (int screen = 0; screen < 120; screen++)
             {
@@ -245,6 +244,7 @@ public sealed class WeChatAutomationService
                 var items = GetContactItems(root, mainWnd.Value);
                 string fp = string.Join("|", items.Select(i => i.Name));
 
+                int newCount = 0;
                 foreach (var item in items)
                 {
                     if (!seen.Add(item.Name)) continue;
@@ -257,27 +257,19 @@ public sealed class WeChatAutomationService
                     string path = Path.Combine(config.ContactAvatarsDirectory, SanitizeFileName(item.Name) + ".png");
                     ImageAutomationHelper.SaveDebug(av, path);
                     count++;
+                    newCount++;
                 }
 
-                LogMsg($"联系人第 {screen + 1} 屏：本屏 {items.Count} 项，累计 {count} 个");
+                LogMsg($"联系人第 {screen + 1} 屏：新增 {newCount} 个，累计 {count} 个");
 
-                if (fp == prevFp)
-                {
-                    if (scrollLevel < 2)
-                    {
-                        scrollLevel++;
-                        LogMsg($"联系人滚动无效（内容未变），切换滚动策略 {scrollLevel + 1}");
-                    }
-                    else if (++emptyStreak >= 2) { LogMsg("通讯录已滚动到底，结束。"); break; }
-                }
-                else
-                {
-                    emptyStreak = 0;
-                    scrollLevel = 0;
-                }
+                // 到底检测：内容未变且无新增计一次停滞；停滞期间按级升级滚动策略，
+                // 连续 4 次停滞即认为已到底部自动结束（不再固定滚满上限屏数）
+                if (fp == prevFp && newCount == 0) stall++;
+                else stall = 0;
+                if (stall >= 4) { LogMsg("通讯录已滚动到底，结束。"); break; }
                 prevFp = fp;
 
-                await ScrollContactsAsync(mainWnd.Value, root, wndRect, items, scrollLevel, ct);
+                await ScrollContactsAsync(mainWnd.Value, root, wndRect, items, Math.Min(stall, 2), ct);
             }
 
             LogMsg($"联系人扫描完成：共保存 {count} 个联系人头像 → {config.ContactAvatarsDirectory}");
@@ -291,7 +283,7 @@ public sealed class WeChatAutomationService
 
     /// <summary>
     /// 定向滚动联系人列表。默认用旧版验证有效的单次中等滚轮（拆成小步反而使微信平滑滚动动画反复重启、几乎不动）；
-    /// 无效时按策略升级：①单次滚轮 ②UIA ScrollPattern ③点击滚动条轨道翻页。滚轮取列表水平中心，避免落在右侧详情面板。
+    /// 无效时按策略升级：①单次滚轮 ②UIA ScrollPattern ③更大滚轮翻页。滚轮取列表水平中心，避免落在右侧详情面板。
     /// </summary>
     private async Task ScrollContactsAsync(IntPtr wnd, AutomationElement root, Rectangle wndRect,
         List<ContactItemInfo> items, int level, CancellationToken ct)
@@ -313,8 +305,9 @@ public sealed class WeChatAutomationService
         }
         else
         {
-            // 点击列表滚动条轨道（拇指下方）触发按页下翻，不依赖滚轮语义
-            ImageAutomationHelper.ClickScreen(wnd, listRight - 4, wndRect.Bottom - 120);
+            // 点击滚动条轨道在底部时会落在拇指上方触发“按页上翻”，造成底部来回震荡且鼠标跳到滚动条处；
+            // 改用更大滚轮翻页，鼠标保持在列表中心
+            ImageAutomationHelper.ScrollScreen(wnd, -WHEEL_DELTA * 6, cx, sy);
         }
         await Task.Delay(700, ct);
     }
@@ -831,7 +824,7 @@ public sealed class WeChatAutomationService
     /// <summary>读取朋友圈列表页中完整可见的 ListItem（每条朋友圈一个，名称含日期和内容摘要）。</summary>
     private List<ListItemInfo> GetListPageItems(AutomationElement root, IntPtr wnd)
     {
-        var result = new List<ListItemInfo>();
+        var candidates = new List<ListItemInfo>();
         try
         {
             GetWindowRect(wnd, out RECT rc);
@@ -855,13 +848,11 @@ public sealed class WeChatAutomationService
                     // 窄元素是日期标签/徽章，不是条目；“置顶”条目跳过
                     if (r.Width < 200) continue;
                     if (name.StartsWith("置顶", StringComparison.Ordinal)) continue;
-                    // 过滤签名/简介等非朋友圈条目（通常很短）；
-                    // 同日多条动态中非首条不含日期前缀但仍是有效条目，不能一刀切过滤
                     if (name.Length < 2) continue;
                     if (name == "朋友圈") continue;
                     if (!seen.Add(name)) continue; // UIA 偶尔重复暴露同一 ListItem
 
-                    result.Add(new ListItemInfo(name, r));
+                    candidates.Add(new ListItemInfo(name, r));
                 }
                 catch { }
             }
@@ -870,7 +861,25 @@ public sealed class WeChatAutomationService
         {
             LogMsg("读取朋友圈列表失败: " + ex.Message);
         }
-        return result.OrderBy(i => i.Rect.Top).ToList();
+
+        // 个性签名/昵称等头部噪声位于首条带日期条目的上方：
+        // 按垂直顺序遍历，见过带日期前缀的条目后才接受无前缀条目——
+        // 既排除头部签名（曾误点签名导致导航离开相册页），又覆盖同日多条的非首条（无日期前缀）
+        var result = new List<ListItemInfo>();
+        bool seenDate = false;
+        foreach (var item in candidates.OrderBy(i => i.Rect.Top))
+        {
+            if (AlbumItemDatePrefixRegex.IsMatch(item.Name))
+            {
+                seenDate = true;
+                result.Add(item);
+            }
+            else if (seenDate)
+            {
+                result.Add(item);
+            }
+        }
+        return result;
     }
 
     /// <summary>是否处于详情页（标题区出现"详情"二字）。</summary>
