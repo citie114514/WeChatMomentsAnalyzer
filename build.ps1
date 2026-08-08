@@ -36,15 +36,19 @@ Write-Host "`nRestore and build..." -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { Write-Error "Build failed" }
 
 # Publish self-contained win-x64 so the runtime folder is always fresh
+# 非致命：publish 失败（如 exe 被运行实例锁定）不应阻断 -Run，构建产物同样可运行
 Write-Host "`nPublishing self-contained package..." -ForegroundColor Cyan
 & dotnet publish $proj -c $Config -r win-x64 -p:Platform=$Arch --self-contained true --no-build
-if ($LASTEXITCODE -ne 0) { Write-Error "Publish failed" }
+if ($LASTEXITCODE -ne 0) { Write-Warning "Publish failed; will fall back to build output for -Run." }
 
 if ($Run) {
-    $exe = Join-Path $root "WeChatMomentsAnalyzer\bin\$Arch\$Config\net8.0-windows10.0.19041.0\win-x64\WeChatMomentsAnalyzer.exe"
+    $base = Join-Path $root "WeChatMomentsAnalyzer\bin\$Arch\$Config\net8.0-windows10.0.19041.0\win-x64"
+    $exe = Join-Path $base 'publish\WeChatMomentsAnalyzer.exe'
+    if (-not (Test-Path $exe)) { $exe = Join-Path $base 'WeChatMomentsAnalyzer.exe' }
     if (-not (Test-Path $exe)) {
-        Write-Error "Executable not found: $exe"
+        Write-Error "Executable not found under: $base"
     }
     Write-Host "`nStart: $exe" -ForegroundColor Green
-    & $exe
+    # Start-Process 异步启动，脚本立即返回，不阻塞终端
+    Start-Process -FilePath $exe
 }
