@@ -73,7 +73,7 @@
                                     QuerySubmitted="FriendBox_QuerySubmitted"
                                     SuggestionChosen="FriendBox_SuggestionChosen"
                                     CornerRadius="{StaticResource Md3ShapeExtraSmallCornerRadius}"/>
-                    <Button Grid.Column="1" Style="{StaticResource Md3FilledButtonStyle}"
+                    <Button Grid.Column="1" Style="{ThemeResource AccentButtonStyle}"
                             Command="{x:Bind ViewModel.SearchCommand}">
                         <TextBlock Text="查询"/>
                     </Button>
