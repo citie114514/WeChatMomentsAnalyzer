@@ -827,7 +827,9 @@ public sealed class WeChatAutomationService
     private static readonly Regex AlbumItemDatePrefixRegex = new(@"^(\d{1,2}月\d{1,2}|\d{4}年\d{1,2}月\d{1,2}|\d+\s*(分钟|小时|天)前|昨天|今天)");
     // 地理位置文本（如"福州市·长乐下沙沙滩"）：纯图片朋友圈会把位置显示为文本，
     // 不能把它当作动态正文或独立条目
-    private static readonly Regex LocationOnlyRegex = new(@"^[\p{IsHan}A-Za-z0-9_\-]{1,12}·[\p{IsHan}A-Za-z0-9_\-·]{1,24}$");
+    // 注意：.NET 正则不支持 \p{IsHan} 脚本名（类型初始化时抛 RegexParseException），
+    // 汉字用 CJK 统一表意文字范围 \u4e00-\u9fff 代替
+    private static readonly Regex LocationOnlyRegex = new(@"^[\u4e00-\u9fffA-Za-z0-9_\-]{1,12}·[\u4e00-\u9fffA-Za-z0-9_\-·]{1,24}$");
 
     /// <summary>读取朋友圈列表页中完整可见的 ListItem（每条朋友圈一个，名称含日期和内容摘要）。</summary>
     private List<ListItemInfo> GetListPageItems(AutomationElement root, IntPtr wnd)
