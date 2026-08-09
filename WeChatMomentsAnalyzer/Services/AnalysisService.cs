@@ -16,10 +16,11 @@ public sealed class AnalysisService
         _repo = repo;
     }
 
-    /// <summary>保存"我的昵称"到配置</summary>
-    public void SaveMyNickname(string nickname) => _repo.SetSetting("my_nickname", nickname);
+    /// <summary>保存"我的昵称"到配置（去首尾空白：历史上曾存入带前导空格的昵称，
+    /// 与扫描解析的 publisher 精确匹配失败，导致排行榜/按好友查询全部为空）</summary>
+    public void SaveMyNickname(string nickname) => _repo.SetSetting("my_nickname", nickname.Trim());
 
-    public string LoadMyNickname() => _repo.GetSetting("my_nickname", string.Empty)!;
+    public string LoadMyNickname() => _repo.GetSetting("my_nickname", string.Empty)!.Trim();
 
     /// <summary>查询指定好友给我点过赞的所有朋友圈</summary>
     public List<MomentPost> GetMomentsLikedByFriend(string friendName)
