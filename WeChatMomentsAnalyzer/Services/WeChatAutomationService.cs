@@ -233,10 +233,20 @@ public sealed class WeChatAutomationService
 
             Directory.CreateDirectory(config.ContactAvatarsDirectory);
 
+            // 全量重建头像库：旧版裁剪偏移错误曾产出整库纯色脏模板，残留文件会导致伪匹配，
+            // 与朋友圈数据的 ClearAll 语义保持一致
+            foreach (var f in Directory.GetFiles(config.ContactAvatarsDirectory, "*.png"))
+            {
+                try { File.Delete(f); } catch { }
+            }
+            LogMsg("已清空旧联系人头像库，本次扫描将完整重建。");
+
             using var automation = CreateAutomation();
             var root = automation.FromHandle(mainWnd.Value);
             GetWindowRect(mainWnd.Value, out RECT wrc);
             var wndRect = new Rectangle(wrc.Left, wrc.Top, wrc.Right - wrc.Left, wrc.Bottom - wrc.Top);
+            // UIA 坐标与 CopyFromScreen 同为物理像素，但微信布局按逻辑像素设计，头像偏移需按 DPI 缩放换算
+            double dpi = GetDpiForWindow(mainWnd.Value) / 96.0;
 
             var seen = new HashSet<string>(StringComparer.Ordinal);
             int count = 0;
@@ -252,13 +262,29 @@ public sealed class WeChatAutomationService
                 int newCount = 0;
                 foreach (var item in items)
                 {
+                    // 底部截断条目头像不完整，留给滚动后的下一屏（不记入 seen）
+                    if (item.Rect.Bottom > wndRect.Bottom - 4) continue;
                     if (!seen.Add(item.Name)) continue;
-                    // 截取头像：ListItem 左侧约 40x40 区域（头像通常在条目左侧）；底部截断条目夹紧避免截到窗口外
-                    int ax = item.Rect.Left + 6;
-                    int ay = item.Rect.Top + Math.Max(2, (item.Rect.Height - 40) / 2);
-                    ay = Math.Min(ay, wndRect.Bottom - 46);
-                    var avRect = new Rectangle(ax, ay, 40, 40);
-                    using var av = ImageAutomationHelper.CaptureRegion(avRect);
+
+                    // 头像在条目内部左侧但不贴左缘（条目含列表左内边距）：实测左偏≈36 逻辑像素、头像≈30 逻辑像素、垂直居中。
+                    // 旧版 Left+6 裁到的是头像左侧的纯色背景，导致整库模板失效。
+                    // 截取条目左侧条带，在多个候选偏移中取标准差最大者（纯色背景 stddev 近 0），防御布局微调。
+                    int avSize = (int)Math.Round(30 * dpi);
+                    int stripW = (int)Math.Round(80 * dpi);
+                    using var strip = ImageAutomationHelper.CaptureRegion(
+                        new Rectangle(item.Rect.Left, item.Rect.Top, stripW, item.Rect.Height));
+                    int bestX = -1;
+                    double bestSd = -1;
+                    foreach (int offLogical in new[] { 36, 28, 44, 20 })
+                    {
+                        int cx = (int)Math.Round(offLogical * dpi);
+                        if (cx + avSize > strip.Width) continue;
+                        using var cand = new Mat(strip, new OpenCvSharp.Rect(cx, Math.Max(0, (strip.Height - avSize) / 2), avSize, avSize));
+                        double sd = ImageAutomationHelper.StdDev(cand);
+                        if (sd > bestSd) { bestSd = sd; bestX = cx; }
+                    }
+                    if (bestX < 0) bestX = (int)Math.Round(36 * dpi);
+                    using var av = new Mat(strip, new OpenCvSharp.Rect(bestX, Math.Max(0, (strip.Height - avSize) / 2), avSize, avSize)).Clone();
                     string path = Path.Combine(config.ContactAvatarsDirectory, SanitizeFileName(item.Name) + ".png");
                     ImageAutomationHelper.SaveDebug(av, path);
                     count++;
@@ -1215,9 +1241,10 @@ public sealed class WeChatAutomationService
     }
 
     /// <summary>
-    /// 判断头像是否属于评论者：OCR 评论行形如"昵称：内容"，文字位于头像右侧且垂直方向重叠；
-    /// 点赞区头像右侧同一水平带没有带冒号的文字行。用于避免把评论人计入点赞人
-    /// （历史上"表哥：新年快乐"中的"表哥"曾被误计为点赞人）。
+    /// 判断头像是否属于评论者：评论区布局为“头像左 + 昵称上/内容下 + 日期右对齐”，
+    /// 即评论头像右侧紧邻昵称文本行（昵称行无冒号，旧版依赖“：”的判定实测全部漏判）；
+    /// 点赞行头像右侧同一水平带没有文本。用于避免把评论人计入点赞人
+    /// （历史上“表哥：新年快乐”中的“表哥”曾被误计为点赞人）。
     /// </summary>
     private static bool IsCommentAvatar(Rect avatar, List<OcrLine> lines)
     {
@@ -1225,14 +1252,14 @@ public sealed class WeChatAutomationService
         {
             var t = l.Text;
             if (string.IsNullOrEmpty(t)) continue;
-            if (!t.Contains('：') && !t.Contains(':')) continue;
             var lr = l.Bounds;
             if (lr.Width <= 0 || lr.Height <= 0) continue;
             int avCy = avatar.Y + avatar.Height / 2;
             int lCy = lr.Y + lr.Height / 2;
-            if (Math.Abs(avCy - lCy) > Math.Max(avatar.Height, lr.Height)) continue;
-            // 评论文字起点紧跟头像右缘
-            if (lr.X >= avatar.X + avatar.Width - 8 && lr.X <= avatar.X + avatar.Width + 320) return true;
+            // 文本行需与头像垂直重叠（昵称行位于头像上半区）
+            if (Math.Abs(avCy - lCy) > (avatar.Height + lr.Height) / 2 + 6) continue;
+            // 昵称文本起点紧跟头像右缘；右对齐的日期行距离过远不会落入该窗口
+            if (lr.X >= avatar.X + avatar.Width - 8 && lr.X <= avatar.X + avatar.Width + 90) return true;
         }
         return false;
     }
@@ -1493,6 +1520,9 @@ public sealed class WeChatAutomationService
 
     [DllImport("user32.dll")]
     private static extern bool BringWindowToTop(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     private static extern bool IsIconic(IntPtr hWnd);
