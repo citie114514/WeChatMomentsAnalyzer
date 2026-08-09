@@ -57,8 +57,8 @@ public sealed class ScanConfig
 {
     /// <summary>我的微信昵称（用于识别"我的朋友圈"）</summary>
     public string MyNickname { get; set; } = string.Empty;
-    /// <summary>最多滚动多少屏</summary>
-    public int MaxScrollScreens { get; set; } = 50;
+    /// <summary>最多滚动多少屏（默认 200：实测约 300 条朋友圈需 150 屏以上，50 屏会在约 60 条处提前截断）</summary>
+    public int MaxScrollScreens { get; set; } = 200;
     /// <summary>每屏等待毫秒</summary>
     public int ScrollWaitMs { get; set; } = 1200;
 

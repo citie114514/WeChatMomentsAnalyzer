@@ -263,7 +263,7 @@ public static class ImageAutomationHelper
     }
 
     /// <summary>将单个头像与联系人库逐一匹配，返回最佳匹配的联系人名（超过阈值时）。
-    /// 仅在头像区域内匹配，配合窄尺度范围（0.85–1.15），避免缩放过小导致背景区伪匹配。</summary>
+    /// 仅在头像区域内匹配；尺度上限需覆盖 点赞头像(≈52px) / 联系人模板(≈45px) ≈ 1.16 的真实比例。</summary>
     public static string? MatchSingleAvatar(Mat avatar, Dictionary<string, Mat> contacts, double threshold = 0.70)
     {
         if (contacts.Count == 0 || avatar.Empty()) return null;
@@ -271,7 +271,7 @@ public static class ImageAutomationHelper
         double bestScore = 0;
         foreach (var kv in contacts)
         {
-            double score = MatchTemplateScore(avatar, kv.Value, 0.85, 1.15);
+            double score = MatchTemplateScore(avatar, kv.Value, 0.85, 1.30);
             if (score > bestScore) { bestScore = score; bestName = kv.Key; }
         }
         return bestScore >= threshold ? bestName : null;
@@ -309,6 +309,17 @@ public static class ImageAutomationHelper
     }
 
     public static void SaveDebug(Mat mat, string path) { try { mat.SaveImage(path); } catch { } }
+
+    /// <summary>图像三通道标准差均值，用于判断裁剪块是否为纯色背景（stddev 过小即无内容）。</summary>
+    public static double StdDev(Mat m)
+    {
+        try
+        {
+            Cv2.MeanStdDev(m, out var mean, out var sd);
+            return (sd.Val0 + sd.Val1 + sd.Val2) / 3.0;
+        }
+        catch { return 0; }
+    }
 
     /// <summary>
     /// 从详情页点赞/评论区截图中提取近方形的头像块。
@@ -351,6 +362,9 @@ public static class ImageAutomationHelper
             Cv2.Threshold(diff, mask, 25, 255, ThresholdTypes.Binary);
             using var kernel = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(3, 3));
             Cv2.MorphologyEx(mask, mask, MorphTypes.Open, kernel);
+            // 保留开运算后的 mask：闭运算会把点赞行相邻头像间的空白桥接起来，
+            // 切分宽连通域时必须用闭运算前的列投影才能找到真实间隙列
+            using var maskOpen = mask.Clone();
             // 闭运算填补头像内部与背景相近的暗洞（黑白照片否则会变空心被面积过滤掉）
             using var kernelClose = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(7, 7));
             Cv2.MorphologyEx(mask, mask, MorphTypes.Close, kernelClose);
@@ -368,6 +382,32 @@ public static class ImageAutomationHelper
                 int w = stats.At<int>(i, (int)ConnectedComponentsTypes.Width);
                 int h = stats.At<int>(i, (int)ConnectedComponentsTypes.Height);
                 int area = stats.At<int>(i, (int)ConnectedComponentsTypes.Area);
+
+                // 宽连通域（点赞行多个头像紧邻合并）：按闭运算前 mask 的列投影以空白列切分成单个头像，
+                // 旧逻辑直接以 w > maxSize 丢弃整个点赞行，导致点赞头像从未被提取
+                if (h >= minSize && h <= maxSize && w > (int)(h * 1.6))
+                {
+                    int gapThresh = (int)(h * 0.12);
+                    int runStart = -1;
+                    for (int c = 0; c <= w; c++)
+                    {
+                        int cnt = c < w ? Cv2.CountNonZero(new Mat(maskOpen, new Rect(x + c, y, 1, h))) : 0;
+                        bool gap = c == w || cnt < gapThresh;
+                        if (!gap && runStart < 0) runStart = c;
+                        if (gap && runStart >= 0)
+                        {
+                            int rw = c - runStart;
+                            if (rw >= minSize - 4 && rw <= maxSize + 8)
+                            {
+                                using var cell = new Mat(maskOpen, new Rect(x + runStart, y, rw, h));
+                                double fill = Cv2.CountNonZero(cell) / (double)(rw * h);
+                                if (fill >= 0.45) boxes.Add(new Rect(x + runStart, y, rw, h));
+                            }
+                            runStart = -1;
+                        }
+                    }
+                    continue;
+                }
 
                 if (w < minSize || h < minSize || w > maxSize || h > maxSize) continue;
                 double ratio = (double)h / w;
