@@ -15,24 +15,27 @@ namespace WeChatMomentsAnalyzer.Services;
 public readonly record struct AvatarMatch(string? Name, double Score, string? BestCandidate);
 
 /// <summary>
-/// 联系人头像匹配器：把联系人头像与朋友圈点赞区头像统一归一化到 64×64 并施加圆形掩膜，
-/// 仅在圆形区域内做三通道归一化互相关（NCC）比较，规避方形裁剪四角背景色差异导致的伪匹配/漏匹配。
+/// 联系人头像匹配器：把联系人头像与朋友圈点赞区头像统一归一化到 64×64 并施加圆角矩形掩膜，
+/// 仅在头像区域内做三通道归一化互相关（NCC）比较，规避方形裁剪四角背景色差异导致的伪匹配/漏匹配。
 /// </summary>
 /// <remarks>
+/// 微信头像是圆角矩形（非纯方形也非纯圆形），填充方形裁剪区、仅在四个角外侧露出背景。
 /// 旧方案（<see cref="ImageAutomationHelper.MatchSingleAvatar"/>）直接对原始方形头像做多尺度
-/// CCoeffNormed。微信头像是圆形的，方形裁剪四角是背景像素；通讯录底色与朋友圈点赞区底色不同，
-/// 这部分像素会显著拉低真实匹配的分数，导致漏匹配。本匹配器用圆形掩膜把四角排除在比较之外，
-/// 并固定到统一尺寸，从而与 DPI / 截图比例无关，单尺度比较即可。
+/// CCoeffNormed，四角背景像素（通讯录底色 vs 点赞区底色不同）会拉低真实匹配分数导致漏匹配。
+/// 本匹配器用与头像形状一致的圆角矩形掩膜把四角背景排除在外，并固定到统一尺寸，
+/// 从而与 DPI / 截图比例无关，单尺度比较即可。
 /// </remarks>
 public sealed class AvatarMatcher : IDisposable
 {
     private const int Canonical = 64;
-    // 圆形掩膜半径：略小于半边（32），避开圆形头像的抗锯齿边缘环。
-    private const int CircleRadius = 30;
+    // 圆角矩形掩膜：内缩 MaskInset 像素避开裁剪边缘余白与抗锯齿环，四角圆半径 CornerRadius。
+    // 微信头像圆角半径约为边长的 1/5，64×64 下约 12~13；可按真机截图调参。
+    private const int MaskInset = 2;
+    private const int CornerRadius = 12;
 
     private readonly Dictionary<string, Mat> _normalized = new(StringComparer.Ordinal);
-    private readonly Mat _circleMask;
-    private readonly Mat _invCircleMask;
+    private readonly Mat _mask;
+    private readonly Mat _invMask;
 
     public int ContactCount => _normalized.Count;
     public double Threshold { get; }
@@ -43,16 +46,26 @@ public sealed class AvatarMatcher : IDisposable
     public AvatarMatcher(string contactAvatarsDirectory, double threshold)
     {
         Threshold = threshold;
-        _circleMask = CreateCircleMask(Canonical, CircleRadius);
-        _invCircleMask = new Mat();
-        Cv2.BitwiseNot(_circleMask, _invCircleMask);
+        _mask = CreateRoundedRectMask(Canonical, MaskInset, CornerRadius);
+        _invMask = new Mat();
+        Cv2.BitwiseNot(_mask, _invMask);
         LoadContacts(contactAvatarsDirectory);
     }
 
-    private static Mat CreateCircleMask(int size, int radius)
+    /// <summary>构造圆角矩形掩膜：中间十字带 + 四角圆，组合成内缩 inset、圆角半径 radius 的填充圆角矩形。</summary>
+    private static Mat CreateRoundedRectMask(int size, int inset, int radius)
     {
         var mask = new Mat(size, size, MatType.CV_8UC1, new Scalar(0));
-        Cv2.Circle(mask, new OpenCvSharp.Point(size / 2, size / 2), radius, new Scalar(255), -1);
+        int x0 = inset, y0 = inset, x1 = size - 1 - inset, y1 = size - 1 - inset;
+        int w = x1 - x0 + 1, h = y1 - y0 + 1;
+        // 中间十字带（竖带 + 横带）
+        Cv2.Rectangle(mask, new OpenCvSharp.Rect(x0 + radius, y0, w - 2 * radius, h), new Scalar(255), -1);
+        Cv2.Rectangle(mask, new OpenCvSharp.Rect(x0, y0 + radius, w, h - 2 * radius), new Scalar(255), -1);
+        // 四角圆
+        Cv2.Circle(mask, new OpenCvSharp.Point(x0 + radius, y0 + radius), radius, new Scalar(255), -1);
+        Cv2.Circle(mask, new OpenCvSharp.Point(x1 - radius, y0 + radius), radius, new Scalar(255), -1);
+        Cv2.Circle(mask, new OpenCvSharp.Point(x0 + radius, y1 - radius), radius, new Scalar(255), -1);
+        Cv2.Circle(mask, new OpenCvSharp.Point(x1 - radius, y1 - radius), radius, new Scalar(255), -1);
         return mask;
     }
 
@@ -73,7 +86,7 @@ public sealed class AvatarMatcher : IDisposable
         }
     }
 
-    /// <summary>归一化：缩放到 64×64 BGR（圆形头像居中），供掩膜 NCC 比较。</summary>
+    /// <summary>归一化：缩放到 64×64 BGR（圆角矩形头像居中），供掩膜 NCC 比较。</summary>
     private Mat? Normalize(Mat raw)
     {
         if (raw.Empty()) return null;
@@ -120,7 +133,7 @@ public sealed class AvatarMatcher : IDisposable
     }
 
     /// <summary>
-    /// 三通道圆形掩膜归一化互相关。
+    /// 三通道圆角矩形掩膜归一化互相关。
     /// 均值仅在掩膜内计算并减去，掩膜外置零，故四角背景完全不参与比较。
     /// </summary>
     private double MaskedNcc(Mat a, Mat b)
@@ -128,14 +141,14 @@ public sealed class AvatarMatcher : IDisposable
         try
         {
             // 掩膜内均值（每通道）
-            var meanA = Cv2.Mean(a, _circleMask);
-            var meanB = Cv2.Mean(b, _circleMask);
+            var meanA = Cv2.Mean(a, _mask);
+            var meanB = Cv2.Mean(b, _mask);
 
             // 中心化：全图减均值（Mat 算术返回 MatExpr，需 ToMat 物化），再把掩膜外置零
             using var aC = (a - new Scalar(meanA.Val0, meanA.Val1, meanA.Val2)).ToMat();
             using var bC = (b - new Scalar(meanB.Val0, meanB.Val1, meanB.Val2)).ToMat();
-            aC.SetTo(new Scalar(0, 0, 0), _invCircleMask);
-            bC.SetTo(new Scalar(0, 0, 0), _invCircleMask);
+            aC.SetTo(new Scalar(0, 0, 0), _invMask);
+            bC.SetTo(new Scalar(0, 0, 0), _invMask);
 
             // 分子：Σ(mask 内 a'·b')，三通道求和
             using var prod = new Mat();
@@ -166,7 +179,7 @@ public sealed class AvatarMatcher : IDisposable
     {
         foreach (var kv in _normalized) kv.Value.Dispose();
         _normalized.Clear();
-        _circleMask.Dispose();
-        _invCircleMask.Dispose();
+        _mask.Dispose();
+        _invMask.Dispose();
     }
 }

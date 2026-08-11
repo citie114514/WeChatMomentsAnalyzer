@@ -45,14 +45,23 @@ Write-Host "`nPublishing self-contained package..." -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { Write-Warning "Publish failed; will fall back to build output for -Run." }
 
 if ($Run) {
-    $base = Join-Path $root "WeChatMomentsAnalyzer\bin\$Arch\$Config\net8.0-windows10.0.19041.0\win-x64"
-    # 优先启动刚构建的最新产物；publish 目录可能残留旧版本 exe，仅作兑底
-    $exe = Join-Path $base 'WeChatMomentsAnalyzer.exe'
-    if (-not (Test-Path $exe)) { $exe = Join-Path $base 'publish\WeChatMomentsAnalyzer.exe' }
-    if (-not (Test-Path $exe)) {
-        Write-Error "Executable not found under: $base"
+    # 在 bin 下递归查找最新构建的 exe，兼容 build/publish 不同输出路径与 RID/Platform 子目录
+    $binRoot = Join-Path $root "WeChatMomentsAnalyzer\bin"
+    $candidates = @()
+    if (Test-Path $binRoot) {
+        $candidates = @(Get-ChildItem -Path $binRoot -Recurse -Filter 'WeChatMomentsAnalyzer.exe' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '\\obj\\' })
     }
-    Write-Host "`nStart: $exe" -ForegroundColor Green
+    if ($candidates.Count -eq 0) {
+        Write-Error "未在 $binRoot 下找到 WeChatMomentsAnalyzer.exe，请确认构建成功。"
+    }
+    # 优先非 publish 产物（刚构建的最新），publish 目录仅作兜底；同组取最新写入时间
+    $exe = $candidates | Where-Object { $_.FullName -notmatch '\\publish\\' } |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $exe) {
+        $exe = $candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    }
+    Write-Host "`nStart: $($exe.FullName)" -ForegroundColor Green
     # Start-Process 异步启动，脚本立即返回，不阻塞终端
-    Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe -Parent)
+    Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName
 }
