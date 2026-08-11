@@ -88,6 +88,14 @@ public sealed class WeChatAutomationService
         // 无法靠按条替换式更新自愈，故每次扫描开始先清空，由当前干净逻辑完整重建
         repo.ClearAll();
         LogMsg("已清空旧的朋友圈/点赞数据，本次扫描将完整重建。");
+
+        // 联系人头像库预归一化一次，供整次扫描的每条朋友圈点赞头像复用匹配。
+        // 匹配器内部按圆形掩膜 NCC 比较，规避方形裁剪四角背景色差异导致的漏匹配。
+        using var matcher = new AvatarMatcher(config.ContactAvatarsDirectory, config.ContactMatchThreshold);
+        if (matcher.ContactCount == 0)
+            LogMsg("警告：联系人头像库为空，点赞人将无法识别。请先在扫描页执行「扫描联系人」。");
+        else
+            LogMsg($"已加载联系人头像库 {matcher.ContactCount} 个，匹配阈值 {config.ContactMatchThreshold:F2}。");
         
         try
         {
@@ -158,7 +166,7 @@ public sealed class WeChatAutomationService
                     var key = ComputeHash(item.Name);
                     if (!seenHashes.Add(key)) continue;
 
-                    var saved = await ScanOneMomentAsync(targetWnd, momentsEl, item, config, repo, ct);
+                    var saved = await ScanOneMomentAsync(targetWnd, momentsEl, item, config, repo, matcher, ct);
                     if (saved != null)
                     {
                         totalMoments++;
@@ -990,7 +998,7 @@ public sealed class WeChatAutomationService
     /// </summary>
     private async Task<int?> ScanOneMomentAsync(
         IntPtr wnd, AutomationElement root, ListItemInfo item,
-        ScanConfig config, MomentsRepository repo, CancellationToken ct)
+        ScanConfig config, MomentsRepository repo, AvatarMatcher matcher, CancellationToken ct)
     {
         try
         {
@@ -1027,7 +1035,7 @@ public sealed class WeChatAutomationService
             LogMsg($"进入详情：{Truncate(post.Publisher, 12)} | {Truncate(post.Content, 24)}");
 
             // 3) 记录日期下方（点赞/评论区）的头像与点赞/评论昵称
-            var (avatarCount, likerNames) = await RecordDetailAvatarsAsync(wnd, root, post, config, ct);
+            var (avatarCount, likerNames) = await RecordDetailAvatarsAsync(wnd, root, post, config, matcher, ct);
             post.Likers = likerNames;
 
             repo.UpsertMoment(post);
@@ -1111,7 +1119,7 @@ public sealed class WeChatAutomationService
     /// OCR 文字行落盘供诊断，并用于排除评论者头像（不直接计入点赞人）。
     /// </summary>
     private async Task<(int avatarCount, List<string> names)> RecordDetailAvatarsAsync(
-        IntPtr wnd, AutomationElement root, MomentPost post, ScanConfig config, CancellationToken ct)
+        IntPtr wnd, AutomationElement root, MomentPost post, ScanConfig config, AvatarMatcher matcher, CancellationToken ct)
     {
         var empty = (0, new List<string>());
         try
@@ -1138,9 +1146,6 @@ public sealed class WeChatAutomationService
 
             var allNames = new HashSet<string>(StringComparer.Ordinal);
             var allAvatars = new List<Mat>();
-            var contacts = ImageAutomationHelper.LoadContactTemplates(config.ContactAvatarsDirectory);
-            try
-            {
                 // 向下分段截取：每段截完后若点赞/评论块尚未完整入视口，继续下滚补截
                 for (int seg = 0; seg < 3; seg++)
                 {
@@ -1175,12 +1180,14 @@ public sealed class WeChatAutomationService
                         {
                             foreach (var (img, bounds) in segAvatars)
                             {
-                                // 评论行（"昵称：内容"）左侧的头像是评论者而非点赞人，跳过匹配；
-                                // 其余头像仅在头像位置与联系人库逐一匹配（窄尺度 0.85–1.15），避免背景区伪匹配
-                                if (!IsCommentAvatar(bounds, ocrLines) && contacts.Count > 0)
+                                // 评论行（"昵称：内容"）左侧的头像是评论者而非点赞人，跳过匹配
+                                if (!IsCommentAvatar(bounds, ocrLines) && matcher.ContactCount > 0)
                                 {
-                                    var name = ImageAutomationHelper.MatchSingleAvatar(img, contacts, 0.70);
-                                    if (name != null) allNames.Add(name);
+                                    var m = matcher.Match(img);
+                                    if (m.Name != null)
+                                        allNames.Add(m.Name);
+                                    else if (m.Score > 0.35)
+                                        LogMsg($"  头像未匹配（最佳候选 {m.BestCandidate} 分数 {m.Score:F2}）");
                                 }
                                 if (!allAvatars.Any(ex => SameAvatar(ex, img)))
                                     allAvatars.Add(img.Clone());
@@ -1199,11 +1206,6 @@ public sealed class WeChatAutomationService
                         (int)(wndRect.Width * 0.35), (int)(wndRect.Height * 0.7));
                     await Task.Delay(700, ct);
                 }
-            }
-            finally
-            {
-                foreach (var kv in contacts) kv.Value.Dispose();
-            }
 
             for (int i = 0; i < allAvatars.Count; i++)
                 ImageAutomationHelper.SaveDebug(allAvatars[i], Path.Combine(dir, $"avatar_{stamp}_{i:00}.png"));
