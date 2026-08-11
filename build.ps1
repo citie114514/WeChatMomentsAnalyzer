@@ -1,4 +1,4 @@
-# Build and optionally run WeChatMomentsAnalyzer
+﻿# Build and optionally run WeChatMomentsAnalyzer
 # Usage:
 #   .\build.ps1              # restore + build (Debug x64)
 #   .\build.ps1 -Run         # build and run
