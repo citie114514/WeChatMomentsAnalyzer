@@ -9,12 +9,16 @@
     <UseWinUI>true</UseWinUI>
     <EnableMsixTooling>true</EnableMsixTooling>
     <WindowsPackageType>None</WindowsPackageType>
-    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
-    <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <UseXamlCompilerExecutable>false</UseXamlCompilerExecutable>
-    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
+    <!-- 框架依赖(去掉 SelfContained/WindowsAppSDKSelfContained)：使用系统已装的 Windows App Runtime 1.4 框架。
+         Program.cs 手动 MddBootstrapInitialize 绑定系统框架是未打包应用的标准方式。
+         自包含构建下(无论手动/自动 bootstrap)Microsoft.UI.Xaml.dll 都会启动 fail-fast(0xC000027B)，故放弃自包含。
+         另设 AppxGenerateProjectPriFile=true 确保未打包构建生成 PRI 资源索引。 -->
     <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
+    <AppxGenerateProjectPriFile>true</AppxGenerateProjectPriFile>
+    <GenerateAppxPackageOnBuild>false</GenerateAppxPackageOnBuild>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>

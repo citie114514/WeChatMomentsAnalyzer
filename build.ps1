@@ -40,8 +40,8 @@ if ($LASTEXITCODE -ne 0) { Write-Error "Build failed" }
 
 # Publish self-contained win-x64 so the runtime folder is always fresh
 # 非致命：publish 失败（如 exe 被运行实例锁定）不应阻断 -Run，构建产物同样可运行
-Write-Host "`nPublishing self-contained package..." -ForegroundColor Cyan
-& dotnet publish $proj -c $Config -r win-x64 -p:Platform=$Arch --self-contained true --no-build
+Write-Host "`nPublishing framework-dependent package..." -ForegroundColor Cyan
+& dotnet publish $proj -c $Config -r win-x64 -p:Platform=$Arch --self-contained false --no-build
 if ($LASTEXITCODE -ne 0) { Write-Warning "Publish failed; will fall back to build output for -Run." }
 
 if ($Run) {
