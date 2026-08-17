@@ -294,9 +294,15 @@ public sealed class WeChatAutomationService
                     if (bestX < 0) bestX = (int)Math.Round(36 * dpi);
                     using var av = new Mat(strip, new OpenCvSharp.Rect(bestX, Math.Max(0, (strip.Height - avSize) / 2), avSize, avSize)).Clone();
                     string path = Path.Combine(config.ContactAvatarsDirectory, SanitizeFileName(item.Name) + ".png");
-                    ImageAutomationHelper.SaveDebug(av, path);
-                    count++;
-                    newCount++;
+                    if (ImageAutomationHelper.SaveDebug(av, path))
+                    {
+                        count++;
+                        newCount++;
+                    }
+                    else
+                    {
+                        LogMsg($"警告：联系人头像保存失败：{item.Name} → {path}");
+                    }
                 }
 
                 LogMsg($"联系人第 {screen + 1} 屏：新增 {newCount} 个，累计 {count} 个");

@@ -308,7 +308,18 @@ public static class ImageAutomationHelper
         return best;
     }
 
-    public static void SaveDebug(Mat mat, string path) { try { mat.SaveImage(path); } catch { } }
+    public static bool SaveDebug(Mat mat, string path)
+    {
+        try
+        {
+            string ext = Path.GetExtension(path);
+            if (string.IsNullOrEmpty(ext)) ext = ".png";
+            if (!Cv2.ImEncode(ext, mat, out byte[] bytes)) return false;
+            File.WriteAllBytes(path, bytes);
+            return true;
+        }
+        catch { return false; }
+    }
 
     /// <summary>图像三通道标准差均值，用于判断裁剪块是否为纯色背景（stddev 过小即无内容）。</summary>
     public static double StdDev(Mat m)
